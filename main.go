@@ -189,34 +189,62 @@ func runCommand(jwtToken, cmdID, command, parameters string) {
 	updateLastSeen(jwtToken)
 
 	// Execute the command using the new command system WITH JWT token
-	result := ExecuteCommand(command, parameters, jwtToken) // <-- Add jwtToken parameter
+	result := ExecuteCommand(command, parameters, jwtToken)
 
-	var finalResult string
-	if result.Status == "success" {
-		// Convert the JSON output to a string
-		jsonBytes, err := json.Marshal(result.Output)
-		if err != nil {
-			finalResult = fmt.Sprintf("Error marshaling result: %v", err)
-			log.Printf("JSON marshal failed: %s", finalResult)
-		} else {
-			finalResult = string(jsonBytes)
-			log.Printf("Command completed successfully")
-		}
-	} else {
-		finalResult = result.Error
-		log.Printf("Command failed: %s", finalResult)
+	// Prepare the payload with both old and new formats for transition period
+	payload := map[string]interface{}{
+		"status": result.Status,
 	}
 
-	// Update the command in the database
-	payload := map[string]interface{}{
-		"status": "done",
-		"result": finalResult,
+	// Handle the new separate result and logs fields
+	if result.Result != nil {
+		// New: structured JSON result data goes to result column (JSONB)
+		payload["result"] = result.Result
+		log.Printf("Command result data: %+v", result.Result)
+	} else if result.Output != nil {
+		// Backward compatibility: if using old Output field, put it in result
+		payload["result"] = result.Output
+		log.Printf("Command output (legacy): %+v", result.Output)
+	}
+
+	// Handle logs - new dedicated logs field
+	var logMessages []string
+
+	if result.Logs != "" {
+		logMessages = append(logMessages, result.Logs)
+	}
+
+	// Also capture any legacy error messages
+	if result.Error != "" {
+		logMessages = append(logMessages, "Error: "+result.Error)
+	}
+
+	// Combine all log messages
+	if len(logMessages) > 0 {
+		combinedLogs := strings.Join(logMessages, "\n")
+		payload["logs"] = combinedLogs
+		log.Printf("Command logs: %s", combinedLogs)
 	}
 
 	// Handle screenshot data separately if present
 	if result.ScreenshotData != "" {
 		payload["screenshot_data"] = result.ScreenshotData
 		log.Printf("Screenshot captured (%d bytes base64)", len(result.ScreenshotData))
+	}
+
+	// Enhanced logging for better debugging
+	if result.Status == "success" {
+		if result.Result != nil {
+			log.Printf("Command completed successfully with structured result")
+		} else {
+			log.Printf("Command completed successfully")
+		}
+	} else {
+		if len(logMessages) > 0 {
+			log.Printf("Command failed: %s", strings.Join(logMessages, "; "))
+		} else {
+			log.Printf("Command failed with status: %s", result.Status)
+		}
 	}
 
 	data, err := json.Marshal(payload)
@@ -252,7 +280,7 @@ func runCommand(jwtToken, cmdID, command, parameters string) {
 		return
 	}
 
-	log.Printf("Successfully updated command %s", cmdID)
+	log.Printf("Successfully updated command %s with new result/logs structure", cmdID)
 }
 
 func heartbeatLoop(ctx context.Context, jwtToken string) {
