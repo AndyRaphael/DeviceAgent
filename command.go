@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -10,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // CommandResult represents the result of a command execution
@@ -27,7 +30,117 @@ type CommandResult struct {
 	ScreenshotData string `json:"screenshot_data,omitempty"`
 }
 
-// Helper functions for creating consistent results
+// Input validation functions to prevent injection attacks
+
+// validateVMID validates that a VM ID is a proper UUID format
+func validateVMID(vmID string) error {
+	if vmID == "" {
+		return errors.New("VM ID cannot be empty")
+	}
+
+	// UUID v4 format: 8-4-4-4-12 hexadecimal digits
+	uuidRegex := regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	if !uuidRegex.MatchString(vmID) {
+		return errors.New("invalid VM ID format - must be valid UUID")
+	}
+
+	return nil
+}
+
+// validateSessionID validates that a session ID is numeric and reasonable
+func validateSessionID(sessionID string) error {
+	if sessionID == "" {
+		return errors.New("session ID cannot be empty")
+	}
+
+	// Must be numeric
+	sessionNum, err := strconv.Atoi(sessionID)
+	if err != nil {
+		return errors.New("session ID must be numeric")
+	}
+
+	// Reasonable range for session IDs (0-999)
+	if sessionNum < 0 || sessionNum > 999 {
+		return errors.New("session ID out of valid range (0-999)")
+	}
+
+	return nil
+}
+
+// validateUsername validates that a username contains only safe characters
+func validateUsername(username string) error {
+	if username == "" {
+		return errors.New("username cannot be empty")
+	}
+
+	// Check length (reasonable username length)
+	if len(username) > 100 {
+		return errors.New("username too long (max 100 characters)")
+	}
+
+	// Only allow alphanumeric, dots, hyphens, underscores, and backslashes (for domain\user)
+	validUsernameRegex := regexp.MustCompile(`^[a-zA-Z0-9._\\-]+$`)
+	if !validUsernameRegex.MatchString(username) {
+		return errors.New("username contains invalid characters")
+	}
+
+	return nil
+}
+
+// validateDelayParameter validates delay parameters for reboot/shutdown
+func validateDelayParameter(delay string) error {
+	if delay == "" {
+		return errors.New("delay parameter cannot be empty")
+	}
+
+	delayNum, err := strconv.Atoi(delay)
+	if err != nil {
+		return errors.New("delay must be a number")
+	}
+
+	// Reasonable delay range: 0 to 24 hours (86400 seconds)
+	if delayNum < 0 || delayNum > 86400 {
+		return errors.New("delay out of valid range (0-86400 seconds)")
+	}
+
+	return nil
+}
+
+// validateGeneralParameter validates general string parameters to prevent injection
+func validateGeneralParameter(paramName, paramValue string) error {
+	if paramValue == "" {
+		return nil // Empty is often okay for optional parameters
+	}
+
+	// Check for potentially dangerous characters that could be used for injection
+	dangerousChars := []string{
+		";", "|", "&", "$", "`", "$(", "${",
+		"'", "\"", "<", ">", "*", "?", "[", "]",
+		"\n", "\r", "\t",
+	}
+
+	for _, char := range dangerousChars {
+		if strings.Contains(paramValue, char) {
+			return fmt.Errorf("parameter '%s' contains potentially dangerous character: %s", paramName, char)
+		}
+	}
+
+	// Check for non-printable characters
+	for _, char := range paramValue {
+		if !unicode.IsPrint(char) && !unicode.IsSpace(char) {
+			return fmt.Errorf("parameter '%s' contains non-printable characters", paramName)
+		}
+	}
+
+	return nil
+}
+
+// sanitizeForPowerShell escapes a string for safe use in PowerShell commands
+func sanitizeForPowerShell(input string) string {
+	// Replace single quotes with doubled single quotes (PowerShell escaping)
+	sanitized := strings.ReplaceAll(input, "'", "''")
+	return sanitized
+}
 
 // NewSuccessResult creates a successful result with structured JSON data
 func NewSuccessResult(data interface{}) CommandResult {
@@ -160,216 +273,6 @@ func ExecuteCommand(command string, parameters string, jwtToken string) CommandR
 			Status: "error",
 		}
 	}
-}
-
-// rebootComputer reboots the computer with optional delay and enhanced logging
-func rebootComputer(params map[string]interface{}) CommandResult {
-	var logs []string
-	logs = append(logs, "Reboot command initiated")
-
-	// Default delay is 30 seconds, can be overridden with parameters
-	delay := "30"
-	if params != nil {
-		if delayParam, ok := params["delay"].(string); ok {
-			delay = delayParam
-			logs = append(logs, fmt.Sprintf("Custom delay specified: %s seconds", delay))
-		} else {
-			logs = append(logs, "Using default delay: 30 seconds")
-		}
-	} else {
-		logs = append(logs, "No parameters provided, using default delay: 30 seconds")
-	}
-
-	// Validate delay parameter
-	if delayInt, err := strconv.Atoi(delay); err != nil {
-		errorMsg := fmt.Sprintf("Invalid delay parameter: %s (must be a number)", delay)
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
-	} else if delayInt < 0 {
-		errorMsg := fmt.Sprintf("Invalid delay parameter: %s (must be non-negative)", delay)
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
-	}
-
-	var cmd *exec.Cmd
-	var method string
-
-	if runtime.GOOS == "windows" {
-		// Windows: shutdown /r /t [seconds] /f (force)
-		method = "windows_shutdown_command"
-		cmd = exec.Command("shutdown", "/r", "/t", delay, "/f", "/c", "System reboot initiated remotely")
-		logs = append(logs, fmt.Sprintf("Using Windows shutdown command: shutdown /r /t %s /f", delay))
-	} else if runtime.GOOS == "darwin" {
-		// macOS: sudo shutdown -r +[minutes]
-		method = "macos_shutdown_command"
-		minutes := "1" // Convert seconds to minutes (minimum 1)
-		if d, err := strconv.Atoi(delay); err == nil && d >= 60 {
-			minutes = strconv.Itoa(d / 60)
-		}
-		cmd = exec.Command("sudo", "shutdown", "-r", "+"+minutes)
-		logs = append(logs, fmt.Sprintf("Using macOS shutdown command: sudo shutdown -r +%s", minutes))
-		logs = append(logs, fmt.Sprintf("Note: Converted %s seconds to %s minutes (macOS minimum)", delay, minutes))
-	} else {
-		// Linux: shutdown -r +[minutes]
-		method = "linux_shutdown_command"
-		minutes := "1"
-		if d, err := strconv.Atoi(delay); err == nil && d >= 60 {
-			minutes = strconv.Itoa(d / 60)
-		}
-		cmd = exec.Command("shutdown", "-r", "+"+minutes)
-		logs = append(logs, fmt.Sprintf("Using Linux shutdown command: shutdown -r +%s", minutes))
-		logs = append(logs, fmt.Sprintf("Note: Converted %s seconds to %s minutes", delay, minutes))
-	}
-
-	logs = append(logs, "Executing reboot command...")
-	output, err := cmd.CombinedOutput()
-	outputStr := strings.TrimSpace(string(output))
-
-	if err != nil {
-		errorMsg := fmt.Sprintf("Failed to initiate reboot: %v", err)
-		logs = append(logs, errorMsg)
-		if outputStr != "" {
-			logs = append(logs, fmt.Sprintf("Command output: %s", outputStr))
-		}
-
-		result := map[string]interface{}{
-			"success": false,
-			"error":   errorMsg,
-			"output":  outputStr,
-			"method":  method,
-			"delay":   delay,
-		}
-
-		return CommandResult{
-			Result: result,
-			Logs:   strings.Join(logs, "\n"),
-			Status: "error",
-		}
-	}
-
-	logs = append(logs, "Reboot command executed successfully")
-	if outputStr != "" {
-		logs = append(logs, fmt.Sprintf("Command output: %s", outputStr))
-	}
-	logs = append(logs, "CRITICAL: System will reboot - agent will be offline during restart")
-
-	result := map[string]interface{}{
-		"success":   true,
-		"message":   fmt.Sprintf("System reboot initiated - will reboot in %s seconds", delay),
-		"delay":     delay,
-		"platform":  runtime.GOOS,
-		"method":    method,
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
-		"output":    outputStr,
-		"warning":   "System will restart and agent will be temporarily offline",
-	}
-
-	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
-}
-
-// shutdownComputer shuts down the computer with optional delay and enhanced logging
-func shutdownComputer(params map[string]interface{}) CommandResult {
-	var logs []string
-	logs = append(logs, "Shutdown command initiated")
-
-	// Default delay is 30 seconds, can be overridden with parameters
-	delay := "30"
-	if params != nil {
-		if delayParam, ok := params["delay"].(string); ok {
-			delay = delayParam
-			logs = append(logs, fmt.Sprintf("Custom delay specified: %s seconds", delay))
-		} else {
-			logs = append(logs, "Using default delay: 30 seconds")
-		}
-	} else {
-		logs = append(logs, "No parameters provided, using default delay: 30 seconds")
-	}
-
-	// Validate delay parameter
-	if delayInt, err := strconv.Atoi(delay); err != nil {
-		errorMsg := fmt.Sprintf("Invalid delay parameter: %s (must be a number)", delay)
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
-	} else if delayInt < 0 {
-		errorMsg := fmt.Sprintf("Invalid delay parameter: %s (must be non-negative)", delay)
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
-	}
-
-	var cmd *exec.Cmd
-	var method string
-
-	if runtime.GOOS == "windows" {
-		// Windows: shutdown /s /t [seconds] /f (force)
-		method = "windows_shutdown_command"
-		cmd = exec.Command("shutdown", "/s", "/t", delay, "/f", "/c", "System shutdown initiated remotely")
-		logs = append(logs, fmt.Sprintf("Using Windows shutdown command: shutdown /s /t %s /f", delay))
-	} else if runtime.GOOS == "darwin" {
-		// macOS: sudo shutdown -h +[minutes]
-		method = "macos_shutdown_command"
-		minutes := "1"
-		if d, err := strconv.Atoi(delay); err == nil && d >= 60 {
-			minutes = strconv.Itoa(d / 60)
-		}
-		cmd = exec.Command("sudo", "shutdown", "-h", "+"+minutes)
-		logs = append(logs, fmt.Sprintf("Using macOS shutdown command: sudo shutdown -h +%s", minutes))
-		logs = append(logs, fmt.Sprintf("Note: Converted %s seconds to %s minutes (macOS minimum)", delay, minutes))
-	} else {
-		// Linux: shutdown -h +[minutes]
-		method = "linux_shutdown_command"
-		minutes := "1"
-		if d, err := strconv.Atoi(delay); err == nil && d >= 60 {
-			minutes = strconv.Itoa(d / 60)
-		}
-		cmd = exec.Command("shutdown", "-h", "+"+minutes)
-		logs = append(logs, fmt.Sprintf("Using Linux shutdown command: shutdown -h +%s", minutes))
-		logs = append(logs, fmt.Sprintf("Note: Converted %s seconds to %s minutes", delay, minutes))
-	}
-
-	logs = append(logs, "Executing shutdown command...")
-	output, err := cmd.CombinedOutput()
-	outputStr := strings.TrimSpace(string(output))
-
-	if err != nil {
-		errorMsg := fmt.Sprintf("Failed to initiate shutdown: %v", err)
-		logs = append(logs, errorMsg)
-		if outputStr != "" {
-			logs = append(logs, fmt.Sprintf("Command output: %s", outputStr))
-		}
-
-		result := map[string]interface{}{
-			"success": false,
-			"error":   errorMsg,
-			"output":  outputStr,
-			"method":  method,
-			"delay":   delay,
-		}
-
-		return CommandResult{
-			Result: result,
-			Logs:   strings.Join(logs, "\n"),
-			Status: "error",
-		}
-	}
-
-	logs = append(logs, "Shutdown command executed successfully")
-	if outputStr != "" {
-		logs = append(logs, fmt.Sprintf("Command output: %s", outputStr))
-	}
-	logs = append(logs, "CRITICAL: System will shutdown - agent will be offline")
-
-	result := map[string]interface{}{
-		"success":   true,
-		"message":   fmt.Sprintf("System shutdown initiated - will shutdown in %s seconds", delay),
-		"delay":     delay,
-		"platform":  runtime.GOOS,
-		"method":    method,
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
-		"output":    outputStr,
-		"warning":   "System will shutdown and agent will be offline until manually restarted",
-	}
-
-	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
 }
 
 // pingDevice responds with system status and updates last_seen with comprehensive logging
@@ -1852,10 +1755,12 @@ func determineUnixSessionType(terminal string) string {
 	return "Unknown"
 }
 
-// logoffUser logs off a user by session ID or username with enhanced logging
+// SECURE REPLACEMENTS for session-based commands in command.go
+
+// logoffUser logs off a user by session ID or username with enhanced security validation
 func logoffUser(params map[string]interface{}) CommandResult {
 	var logs []string
-	logs = append(logs, "Starting user logoff operation")
+	logs = append(logs, "User logoff operation initiated with security validation")
 
 	if params == nil {
 		errorMsg := "Parameters required for logoff_user command"
@@ -1878,10 +1783,34 @@ func logoffUser(params map[string]interface{}) CommandResult {
 		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
+	// SECURITY: Validate session ID if provided
+	if hasSessionID {
+		logs = append(logs, "Validating session ID format for security")
+		if err := validateSessionID(sessionID); err != nil {
+			errorMsg := fmt.Sprintf("Invalid session ID: %v", err)
+			logs = append(logs, errorMsg)
+			logs = append(logs, "SECURITY: Session ID validation failed - potential injection attempt")
+			return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+		}
+		logs = append(logs, "Session ID validation passed")
+	}
+
+	// SECURITY: Validate username if provided
+	if hasUsername {
+		logs = append(logs, "Validating username format for security")
+		if err := validateUsername(username); err != nil {
+			errorMsg := fmt.Sprintf("Invalid username: %v", err)
+			logs = append(logs, errorMsg)
+			logs = append(logs, "SECURITY: Username validation failed - potential injection attempt")
+			return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+		}
+		logs = append(logs, "Username validation passed")
+	}
+
 	// If username is provided, find the session ID first
 	if hasUsername && !hasSessionID {
 		logs = append(logs, fmt.Sprintf("Looking up session ID for username: %s", username))
-		sessionID = findSessionByUsername(username)
+		sessionID = findSessionByUsernameSecure(username)
 		if sessionID == "" {
 			errorMsg := fmt.Sprintf("No active session found for user: %s", username)
 			logs = append(logs, errorMsg)
@@ -1892,7 +1821,7 @@ func logoffUser(params map[string]interface{}) CommandResult {
 
 	logs = append(logs, fmt.Sprintf("Attempting to logoff session ID: %s", sessionID))
 
-	// Execute logoff command
+	// Execute logoff command with validated session ID
 	cmd := exec.Command("logoff", sessionID)
 	out, err := cmd.CombinedOutput()
 
@@ -1928,11 +1857,273 @@ func logoffUser(params map[string]interface{}) CommandResult {
 		"message":    fmt.Sprintf("Successfully logged off session %s", sessionID),
 		"output":     strings.TrimSpace(string(out)),
 		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		"method":     "secure_logoff_operation",
 	}
 
 	if hasUsername {
 		result["username"] = username
 		logs = append(logs, fmt.Sprintf("Logoff completed for user %s (session %s)", username, sessionID))
+	}
+
+	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
+}
+
+// findSessionByUsernameSecure finds the session ID for a given username with security validation
+func findSessionByUsernameSecure(username string) string {
+	// SECURITY: Validate username before using in commands
+	if err := validateUsername(username); err != nil {
+		log.Printf("SECURITY: Invalid username in session lookup: %v", err)
+		return ""
+	}
+
+	// Try query session first
+	cmd := exec.Command("query", "session")
+	out, err := cmd.Output()
+	if err != nil {
+		// Fallback to qwinsta
+		cmd = exec.Command("qwinsta")
+		out, err = cmd.Output()
+		if err != nil {
+			return ""
+		}
+	}
+
+	lines := strings.Split(string(out), "\n")
+
+	for i, line := range lines {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue // Skip header and empty lines
+		}
+
+		// Use regex to parse the session line
+		re := regexp.MustCompile(`\s*(\S+)\s+(\S*)\s+(\d+)\s+(\S+)`)
+		matches := re.FindStringSubmatch(line)
+
+		if len(matches) >= 4 {
+			sessionUsername := strings.TrimSpace(matches[2])
+			sessionID := strings.TrimSpace(matches[3])
+			sessionState := strings.TrimSpace(matches[4])
+
+			// SECURITY: Validate the session ID we found before returning it
+			if err := validateSessionID(sessionID); err != nil {
+				log.Printf("SECURITY: Found invalid session ID in session lookup: %v", err)
+				continue
+			}
+
+			// Match username (case insensitive) and ensure it's an active or disconnected session
+			if strings.EqualFold(sessionUsername, username) &&
+				(sessionState == "Active" || sessionState == "Disc") {
+				return sessionID
+			}
+		}
+	}
+
+	return ""
+}
+
+// SECURE REPLACEMENT for rebootComputer with input validation
+func rebootComputer(params map[string]interface{}) CommandResult {
+	var logs []string
+	logs = append(logs, "Reboot command initiated with security validation")
+
+	// Default delay is 30 seconds, can be overridden with parameters
+	delay := "30"
+	if params != nil {
+		if delayParam, ok := params["delay"].(string); ok {
+			logs = append(logs, "Custom delay parameter provided")
+
+			// SECURITY: Validate delay parameter
+			if err := validateDelayParameter(delayParam); err != nil {
+				errorMsg := fmt.Sprintf("Invalid delay parameter: %v", err)
+				logs = append(logs, errorMsg)
+				logs = append(logs, "SECURITY: Delay parameter validation failed - potential injection attempt")
+				return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+			}
+
+			delay = delayParam
+			logs = append(logs, fmt.Sprintf("Delay parameter validation passed: %s seconds", delay))
+		} else {
+			logs = append(logs, "Using default delay: 30 seconds")
+		}
+	} else {
+		logs = append(logs, "No parameters provided, using default delay: 30 seconds")
+	}
+
+	var cmd *exec.Cmd
+	var method string
+
+	if runtime.GOOS == "windows" {
+		// Windows: shutdown /r /t [seconds] /f (force)
+		method = "windows_shutdown_command"
+		cmd = exec.Command("shutdown", "/r", "/t", delay, "/f", "/c", "System reboot initiated remotely")
+		logs = append(logs, fmt.Sprintf("Using Windows shutdown command: shutdown /r /t %s /f", delay))
+	} else if runtime.GOOS == "darwin" {
+		// macOS: sudo shutdown -r +[minutes]
+		method = "macos_shutdown_command"
+		minutes := "1" // Convert seconds to minutes (minimum 1)
+		if d, err := strconv.Atoi(delay); err == nil && d >= 60 {
+			minutes = strconv.Itoa(d / 60)
+		}
+		cmd = exec.Command("sudo", "shutdown", "-r", "+"+minutes)
+		logs = append(logs, fmt.Sprintf("Using macOS shutdown command: sudo shutdown -r +%s", minutes))
+		logs = append(logs, fmt.Sprintf("Note: Converted %s seconds to %s minutes (macOS minimum)", delay, minutes))
+	} else {
+		// Linux: shutdown -r +[minutes]
+		method = "linux_shutdown_command"
+		minutes := "1"
+		if d, err := strconv.Atoi(delay); err == nil && d >= 60 {
+			minutes = strconv.Itoa(d / 60)
+		}
+		cmd = exec.Command("shutdown", "-r", "+"+minutes)
+		logs = append(logs, fmt.Sprintf("Using Linux shutdown command: shutdown -r +%s", minutes))
+		logs = append(logs, fmt.Sprintf("Note: Converted %s seconds to %s minutes", delay, minutes))
+	}
+
+	logs = append(logs, "Executing reboot command...")
+	output, err := cmd.CombinedOutput()
+	outputStr := strings.TrimSpace(string(output))
+
+	if err != nil {
+		errorMsg := fmt.Sprintf("Failed to initiate reboot: %v", err)
+		logs = append(logs, errorMsg)
+		if outputStr != "" {
+			logs = append(logs, fmt.Sprintf("Command output: %s", outputStr))
+		}
+
+		result := map[string]interface{}{
+			"success": false,
+			"error":   errorMsg,
+			"output":  outputStr,
+			"method":  method,
+			"delay":   delay,
+		}
+
+		return CommandResult{
+			Result: result,
+			Logs:   strings.Join(logs, "\n"),
+			Status: "error",
+		}
+	}
+
+	logs = append(logs, "Reboot command executed successfully")
+	if outputStr != "" {
+		logs = append(logs, fmt.Sprintf("Command output: %s", outputStr))
+	}
+	logs = append(logs, "CRITICAL: System will reboot - agent will be offline during restart")
+
+	result := map[string]interface{}{
+		"success":   true,
+		"message":   fmt.Sprintf("System reboot initiated - will reboot in %s seconds", delay),
+		"delay":     delay,
+		"platform":  runtime.GOOS,
+		"method":    method + "_secure",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"output":    outputStr,
+		"warning":   "System will restart and agent will be temporarily offline",
+	}
+
+	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
+}
+
+// SECURE REPLACEMENT for shutdownComputer with input validation
+func shutdownComputer(params map[string]interface{}) CommandResult {
+	var logs []string
+	logs = append(logs, "Shutdown command initiated with security validation")
+
+	// Default delay is 30 seconds, can be overridden with parameters
+	delay := "30"
+	if params != nil {
+		if delayParam, ok := params["delay"].(string); ok {
+			logs = append(logs, "Custom delay parameter provided")
+
+			// SECURITY: Validate delay parameter
+			if err := validateDelayParameter(delayParam); err != nil {
+				errorMsg := fmt.Sprintf("Invalid delay parameter: %v", err)
+				logs = append(logs, errorMsg)
+				logs = append(logs, "SECURITY: Delay parameter validation failed - potential injection attempt")
+				return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+			}
+
+			delay = delayParam
+			logs = append(logs, fmt.Sprintf("Delay parameter validation passed: %s seconds", delay))
+		} else {
+			logs = append(logs, "Using default delay: 30 seconds")
+		}
+	} else {
+		logs = append(logs, "No parameters provided, using default delay: 30 seconds")
+	}
+
+	var cmd *exec.Cmd
+	var method string
+
+	if runtime.GOOS == "windows" {
+		// Windows: shutdown /s /t [seconds] /f (force)
+		method = "windows_shutdown_command"
+		cmd = exec.Command("shutdown", "/s", "/t", delay, "/f", "/c", "System shutdown initiated remotely")
+		logs = append(logs, fmt.Sprintf("Using Windows shutdown command: shutdown /s /t %s /f", delay))
+	} else if runtime.GOOS == "darwin" {
+		// macOS: sudo shutdown -h +[minutes]
+		method = "macos_shutdown_command"
+		minutes := "1"
+		if d, err := strconv.Atoi(delay); err == nil && d >= 60 {
+			minutes = strconv.Itoa(d / 60)
+		}
+		cmd = exec.Command("sudo", "shutdown", "-h", "+"+minutes)
+		logs = append(logs, fmt.Sprintf("Using macOS shutdown command: sudo shutdown -h +%s", minutes))
+		logs = append(logs, fmt.Sprintf("Note: Converted %s seconds to %s minutes (macOS minimum)", delay, minutes))
+	} else {
+		// Linux: shutdown -h +[minutes]
+		method = "linux_shutdown_command"
+		minutes := "1"
+		if d, err := strconv.Atoi(delay); err == nil && d >= 60 {
+			minutes = strconv.Itoa(d / 60)
+		}
+		cmd = exec.Command("shutdown", "-h", "+"+minutes)
+		logs = append(logs, fmt.Sprintf("Using Linux shutdown command: shutdown -h +%s", minutes))
+		logs = append(logs, fmt.Sprintf("Note: Converted %s seconds to %s minutes", delay, minutes))
+	}
+
+	logs = append(logs, "Executing shutdown command...")
+	output, err := cmd.CombinedOutput()
+	outputStr := strings.TrimSpace(string(output))
+
+	if err != nil {
+		errorMsg := fmt.Sprintf("Failed to initiate shutdown: %v", err)
+		logs = append(logs, errorMsg)
+		if outputStr != "" {
+			logs = append(logs, fmt.Sprintf("Command output: %s", outputStr))
+		}
+
+		result := map[string]interface{}{
+			"success": false,
+			"error":   errorMsg,
+			"output":  outputStr,
+			"method":  method,
+			"delay":   delay,
+		}
+
+		return CommandResult{
+			Result: result,
+			Logs:   strings.Join(logs, "\n"),
+			Status: "error",
+		}
+	}
+
+	logs = append(logs, "Shutdown command executed successfully")
+	if outputStr != "" {
+		logs = append(logs, fmt.Sprintf("Command output: %s", outputStr))
+	}
+	logs = append(logs, "CRITICAL: System will shutdown - agent will be offline")
+
+	result := map[string]interface{}{
+		"success":   true,
+		"message":   fmt.Sprintf("System shutdown initiated - will shutdown in %s seconds", delay),
+		"delay":     delay,
+		"platform":  runtime.GOOS,
+		"method":    method + "_secure",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"output":    outputStr,
+		"warning":   "System will shutdown and agent will be offline until manually restarted",
 	}
 
 	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))

@@ -163,10 +163,12 @@ var (
 	procGetBitmapBits           = modgdi32.NewProc("GetBitmapBits")
 )
 
-// captureScreen - Main entry point with WTS detection
+// SECURE REPLACEMENT for captureScreen function in screen_capture.go
+
+// captureScreen - Main entry point with enhanced security validation
 func captureScreen(params map[string]interface{}) CommandResult {
 	var logs []string
-	logs = append(logs, "Screen capture command initiated")
+	logs = append(logs, "Screen capture command initiated with security validation")
 
 	sessionID, hasSessionID := params["session_id"].(string)
 	username, hasUsername := params["username"].(string)
@@ -177,16 +179,48 @@ func captureScreen(params map[string]interface{}) CommandResult {
 		return createScreenCaptureError(errorMsg, logs)
 	}
 
-	// If username provided, find session ID
+	// SECURITY: Validate session ID if provided
+	if hasSessionID {
+		logs = append(logs, "Validating session ID format for security")
+		if err := validateSessionID(sessionID); err != nil {
+			errorMsg := fmt.Sprintf("Invalid session ID: %v", err)
+			logs = append(logs, errorMsg)
+			logs = append(logs, "SECURITY: Session ID validation failed - potential injection attempt")
+			return createScreenCaptureError(errorMsg, logs)
+		}
+		logs = append(logs, "Session ID validation passed")
+	}
+
+	// SECURITY: Validate username if provided
+	if hasUsername {
+		logs = append(logs, "Validating username format for security")
+		if err := validateUsername(username); err != nil {
+			errorMsg := fmt.Sprintf("Invalid username: %v", err)
+			logs = append(logs, errorMsg)
+			logs = append(logs, "SECURITY: Username validation failed - potential injection attempt")
+			return createScreenCaptureError(errorMsg, logs)
+		}
+		logs = append(logs, "Username validation passed")
+	}
+
+	// If username provided, find session ID with secure lookup
 	if hasUsername && !hasSessionID {
 		logs = append(logs, fmt.Sprintf("Looking up session ID for username: %s", username))
-		sessionID = findSessionByUsername(username)
+		sessionID = findSessionByUsernameSecure(username)
 		if sessionID == "" {
 			errorMsg := fmt.Sprintf("No session found for user: %s", username)
 			logs = append(logs, errorMsg)
 			return createScreenCaptureError(errorMsg, logs)
 		}
 		logs = append(logs, fmt.Sprintf("Found session ID: %s for username: %s", sessionID, username))
+	}
+
+	// SECURITY: Double-check session ID validation (in case it came from username lookup)
+	if err := validateSessionID(sessionID); err != nil {
+		errorMsg := fmt.Sprintf("Final session ID validation failed: %v", err)
+		logs = append(logs, errorMsg)
+		logs = append(logs, "SECURITY: Final session ID check failed")
+		return createScreenCaptureError(errorMsg, logs)
 	}
 
 	timestamp := time.Now().Format("20060102_150405")
@@ -205,6 +239,10 @@ func captureScreen(params map[string]interface{}) CommandResult {
 
 	logs = append(logs, fmt.Sprintf("Session type: %s, Session state: %s", sessionInfo.SessionType, sessionInfo.State))
 
+	// SECURITY: Log screen capture attempt for audit trail
+	logs = append(logs, fmt.Sprintf("AUDIT: Screen capture requested for session %s, type %s, state %s",
+		sessionID, sessionInfo.SessionType, sessionInfo.State))
+
 	// Choose capture method based on session type and current context - PRESERVE EXISTING LOGIC
 	var result CommandResult
 	if sessionInfo.IsRDPSession() && isSystemUser {
@@ -218,11 +256,24 @@ func captureScreen(params map[string]interface{}) CommandResult {
 		result = captureScreenDirect(sessionID, timestamp)
 	}
 
-	// SAFELY add our logs to existing result without breaking anything
+	// SAFELY add our security logs to existing result without breaking anything
 	if result.Logs == "" {
 		result.Logs = strings.Join(logs, "\n")
 	} else {
 		result.Logs = strings.Join(logs, "\n") + "\n\n" + result.Logs
+	}
+
+	// SECURITY: Add audit information to successful captures
+	if result.Status == "success" && result.Result != nil {
+		if resultMap, ok := result.Result.(map[string]interface{}); ok {
+			resultMap["security_validated"] = true
+			resultMap["audit_session_id"] = sessionID
+			resultMap["audit_session_type"] = sessionInfo.SessionType
+			resultMap["audit_timestamp"] = time.Now().UTC().Format(time.RFC3339)
+
+			// Add privacy notice
+			resultMap["privacy_notice"] = "Screen capture performed - ensure compliance with privacy policies"
+		}
 	}
 
 	return result

@@ -198,34 +198,44 @@ func executeHyperVInventoryWithDB(jwtToken string) CommandResult {
 	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
 }
 
-// executeHyperVScreenshot captures actual VM screen content using Hyper-V WMI
+// SECURE REPLACEMENTS for Hyper-V operation functions in hyperv.go
+
+// executeHyperVScreenshot captures VM screen with input validation
 func executeHyperVScreenshot(params map[string]interface{}) CommandResult {
+	var logs []string
+	logs = append(logs, "Hyper-V screenshot command initiated with security validation")
+
 	if runtime.GOOS != "windows" {
-		return CommandResult{
-			Output: map[string]string{"error": "Hyper-V commands are only supported on Windows"},
-			Error:  "Hyper-V commands are only supported on Windows",
-			Status: "error",
-		}
+		errorMsg := "Hyper-V commands are only supported on Windows"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	if params == nil {
-		return CommandResult{
-			Output: map[string]string{"error": "VM ID parameter is required"},
-			Error:  "VM ID parameter is required",
-			Status: "error",
-		}
+		errorMsg := "VM ID parameter is required"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	vmID, ok := params["vm_id"].(string)
 	if !ok || vmID == "" {
-		return CommandResult{
-			Output: map[string]string{"error": "Valid VM ID parameter is required"},
-			Error:  "Valid VM ID parameter is required",
-			Status: "error",
-		}
+		errorMsg := "Valid VM ID parameter is required"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
-	// First check if VM exists and is running (using working method)
+	// SECURITY: Validate VM ID to prevent injection
+	logs = append(logs, "Validating VM ID format for security")
+	if err := validateVMID(vmID); err != nil {
+		errorMsg := fmt.Sprintf("Invalid VM ID: %v", err)
+		logs = append(logs, errorMsg)
+		logs = append(logs, "SECURITY: VM ID validation failed - potential injection attempt")
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+	logs = append(logs, "VM ID validation passed")
+
+	// First check if VM exists and is running (using working method with sanitized input)
+	sanitizedVMID := sanitizeForPowerShell(vmID)
 	checkScript := fmt.Sprintf(`
 	try {
 		$vm = Get-VM -Id '%s' -ErrorAction Stop
@@ -233,68 +243,58 @@ func executeHyperVScreenshot(params map[string]interface{}) CommandResult {
 	} catch {
 		Write-Output "VM_ERROR:$($_.Exception.Message)"
 	}
-	`, vmID)
+	`, sanitizedVMID)
 
+	logs = append(logs, "Executing VM existence check with sanitized input")
 	checkCmd := exec.Command("powershell", "-Command", checkScript)
 	checkOutput, err := checkCmd.CombinedOutput()
 
 	if err != nil {
-		return CommandResult{
-			Output: map[string]string{"error": fmt.Sprintf("VM lookup failed: %v", err)},
-			Error:  fmt.Sprintf("VM lookup failed: %v", err),
-			Status: "error",
-		}
+		errorMsg := fmt.Sprintf("VM lookup failed: %v", err)
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	checkResult := strings.TrimSpace(string(checkOutput))
 
 	if strings.HasPrefix(checkResult, "VM_ERROR:") {
 		errorMsg := strings.TrimPrefix(checkResult, "VM_ERROR:")
-		return CommandResult{
-			Output: map[string]string{"error": fmt.Sprintf("VM error: %s", errorMsg)},
-			Error:  fmt.Sprintf("VM error: %s", errorMsg),
-			Status: "error",
-		}
+		logs = append(logs, fmt.Sprintf("VM error: %s", errorMsg))
+		return NewErrorResultWithDetails(fmt.Sprintf("VM error: %s", errorMsg), strings.Join(logs, "\n"))
 	}
 
 	if !strings.HasPrefix(checkResult, "VM_FOUND:") {
-		return CommandResult{
-			Output: map[string]string{"error": "Unexpected VM lookup result"},
-			Error:  "Unexpected VM lookup result",
-			Status: "error",
-		}
+		errorMsg := "Unexpected VM lookup result"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	// Parse VM info
 	parts := strings.Split(checkResult, ":")
 	if len(parts) < 3 {
-		return CommandResult{
-			Output: map[string]string{"error": "Invalid VM info format"},
-			Error:  "Invalid VM info format",
-			Status: "error",
-		}
+		errorMsg := "Invalid VM info format"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	vmName := parts[1]
 	vmState := parts[2]
+	logs = append(logs, fmt.Sprintf("VM found: %s (State: %s)", vmName, vmState))
 
 	if vmState != "Running" {
-		return CommandResult{
-			Output: map[string]string{
-				"error": fmt.Sprintf("Cannot capture screenshot - VM is not running (state: %s)", vmState),
-			},
-			Error:  fmt.Sprintf("Cannot capture screenshot - VM is not running (state: %s)", vmState),
-			Status: "error",
-		}
+		errorMsg := fmt.Sprintf("Cannot capture screenshot - VM is not running (state: %s)", vmState)
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
-	// Now capture actual VM screen using Hyper-V WMI method
+	// Now capture actual VM screen using Hyper-V WMI method with sanitized VM name
+	sanitizedVMName := sanitizeForPowerShell(vmName)
 	screenshotScript := fmt.Sprintf(`
 	try {
 		# Add required assemblies
 		Add-Type -AssemblyName "System.Drawing"
 		
-		# Get the VM using WMI (by VM name since we have it)
+		# Get the VM using WMI (by VM name since we have it) - using sanitized name
 		$VMCS = Get-WmiObject -Namespace root\virtualization\v2 -Class Msvm_ComputerSystem -Filter "ElementName='%s'"
 		
 		if (-not $VMCS) {
@@ -364,7 +364,7 @@ func executeHyperVScreenshot(params map[string]interface{}) CommandResult {
 		# Convert resized image to JPEG with compression and base64
 		$ms = New-Object System.IO.MemoryStream
 		
-		# Create JPEG encoder with quality setting (70% quality for good balance)
+		# Create JPEG encoder with quality setting (70%% quality for good balance)
 		$jpegEncoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq "image/jpeg" }
 		$encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
 		$qualityParam = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 70L)
@@ -386,19 +386,23 @@ func executeHyperVScreenshot(params map[string]interface{}) CommandResult {
 	} catch {
 		Write-Output "SCREENSHOT_ERROR:$($_.Exception.Message)"
 	}
-	`, vmName)
+	`, sanitizedVMName)
 
+	logs = append(logs, "Executing VM screenshot capture with sanitized inputs")
 	screenshotCmd := exec.Command("powershell", "-Command", screenshotScript)
 	screenshotOutput, err := screenshotCmd.CombinedOutput()
 
 	if err != nil {
+		errorMsg := fmt.Sprintf("Screenshot command failed: %v", err)
+		logs = append(logs, errorMsg)
+		result := map[string]interface{}{
+			"error":      errorMsg,
+			"vm_info":    fmt.Sprintf("%s (%s)", vmName, vmState),
+			"raw_output": string(screenshotOutput),
+		}
 		return CommandResult{
-			Output: map[string]interface{}{
-				"error":      fmt.Sprintf("Screenshot command failed: %v", err),
-				"vm_info":    fmt.Sprintf("%s (%s)", vmName, vmState),
-				"raw_output": string(screenshotOutput),
-			},
-			Error:  fmt.Sprintf("Screenshot command failed: %v", err),
+			Result: result,
+			Logs:   strings.Join(logs, "\n"),
 			Status: "error",
 		}
 	}
@@ -409,11 +413,9 @@ func executeHyperVScreenshot(params map[string]interface{}) CommandResult {
 		// Parse the result which now includes dimensions
 		resultParts := strings.SplitN(screenshotResult, ":", 3)
 		if len(resultParts) < 3 {
-			return CommandResult{
-				Output: map[string]string{"error": "Invalid screenshot result format"},
-				Error:  "Invalid screenshot result format",
-				Status: "error",
-			}
+			errorMsg := "Invalid screenshot result format"
+			logs = append(logs, errorMsg)
+			return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 		}
 
 		dimensions := resultParts[1]
@@ -421,62 +423,330 @@ func executeHyperVScreenshot(params map[string]interface{}) CommandResult {
 
 		// Update VM last_seen in database
 		if err := updateVMLastSeen("", vmID); err != nil {
-			log.Printf("Failed to update VM last_seen in database: %v", err)
+			logs = append(logs, fmt.Sprintf("Warning: Failed to update VM last_seen: %v", err))
+		}
+
+		logs = append(logs, "Screenshot captured successfully with security validation")
+
+		result := map[string]interface{}{
+			"success":    true,
+			"vm_id":      vmID,
+			"vm_name":    vmName,
+			"vm_state":   vmState,
+			"dimensions": dimensions,
+			"timestamp":  time.Now().UTC().Format(time.RFC3339),
+			"message":    "VM screenshot captured, resized, and compressed successfully",
+			"method":     "wmi_thumbnail_jpeg_compressed_secure",
+			"format":     "JPEG",
+			"quality":    "70%",
 		}
 
 		return CommandResult{
-			Output: map[string]interface{}{
-				"success":    true,
-				"vm_id":      vmID,
-				"vm_name":    vmName,
-				"vm_state":   vmState,
-				"dimensions": dimensions,
-				"timestamp":  time.Now().UTC().Format(time.RFC3339),
-				"message":    "VM screenshot captured, resized, and compressed successfully",
-				"method":     "wmi_thumbnail_jpeg_compressed",
-				"format":     "JPEG",
-				"quality":    "70%",
-			},
+			Result:         result,
 			ScreenshotData: base64Data,
-			Error:          "",
+			Logs:           strings.Join(logs, "\n"),
 			Status:         "success",
 		}
 	} else if strings.HasPrefix(screenshotResult, "WMI_ERROR:") {
 		errorMsg := strings.TrimPrefix(screenshotResult, "WMI_ERROR:")
+		logs = append(logs, fmt.Sprintf("WMI error: %s", errorMsg))
+		result := map[string]interface{}{
+			"error":      fmt.Sprintf("WMI error: %s", errorMsg),
+			"vm_info":    fmt.Sprintf("%s (%s)", vmName, vmState),
+			"suggestion": "VM may not support screen capture or video head not available",
+		}
 		return CommandResult{
-			Output: map[string]interface{}{
-				"error":      fmt.Sprintf("WMI error: %s", errorMsg),
-				"vm_info":    fmt.Sprintf("%s (%s)", vmName, vmState),
-				"suggestion": "VM may not support screen capture or video head not available",
-			},
-			Error:  fmt.Sprintf("WMI error: %s", errorMsg),
+			Result: result,
+			Logs:   strings.Join(logs, "\n"),
 			Status: "error",
 		}
 	} else if strings.HasPrefix(screenshotResult, "SCREENSHOT_ERROR:") {
 		errorMsg := strings.TrimPrefix(screenshotResult, "SCREENSHOT_ERROR:")
+		logs = append(logs, fmt.Sprintf("Screenshot error: %s", errorMsg))
+		result := map[string]interface{}{
+			"error":      fmt.Sprintf("Screenshot error: %s", errorMsg),
+			"vm_info":    fmt.Sprintf("%s (%s)", vmName, vmState),
+			"raw_output": screenshotResult,
+		}
 		return CommandResult{
-			Output: map[string]interface{}{
-				"error":      fmt.Sprintf("Screenshot error: %s", errorMsg),
-				"vm_info":    fmt.Sprintf("%s (%s)", vmName, vmState),
-				"raw_output": screenshotResult,
-			},
-			Error:  fmt.Sprintf("Screenshot error: %s", errorMsg),
+			Result: result,
+			Logs:   strings.Join(logs, "\n"),
 			Status: "error",
 		}
 	}
 
+	errorMsg := "Unexpected screenshot result"
+	logs = append(logs, errorMsg)
+	result := map[string]interface{}{
+		"error":      errorMsg,
+		"vm_info":    fmt.Sprintf("%s (%s)", vmName, vmState),
+		"raw_output": screenshotResult,
+	}
 	return CommandResult{
-		Output: map[string]interface{}{
-			"error":      "Unexpected screenshot result",
-			"vm_info":    fmt.Sprintf("%s (%s)", vmName, vmState),
-			"raw_output": screenshotResult,
-		},
-		Error:  "Unexpected screenshot result",
+		Result: result,
+		Logs:   strings.Join(logs, "\n"),
 		Status: "error",
 	}
 }
 
-// executeHyperVStart starts a VM and updates database
+// SECURE REPLACEMENTS for VM control functions in hyperv.go
+
+// executeHyperVOperation is a generic function for VM operations with security validation
+func executeHyperVOperation(params map[string]interface{}, powershellCmd, operation, resultState string) CommandResult {
+	var logs []string
+	logs = append(logs, fmt.Sprintf("Hyper-V %s operation initiated with security validation", operation))
+
+	if runtime.GOOS != "windows" {
+		errorMsg := "Hyper-V commands are only supported on Windows"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+
+	if params == nil {
+		errorMsg := "VM ID parameter is required"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+
+	vmID, ok := params["vm_id"].(string)
+	if !ok || vmID == "" {
+		errorMsg := "Valid VM ID parameter is required"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+
+	// SECURITY: Validate VM ID to prevent injection
+	logs = append(logs, "Validating VM ID format for security")
+	if err := validateVMID(vmID); err != nil {
+		errorMsg := fmt.Sprintf("Invalid VM ID: %v", err)
+		logs = append(logs, errorMsg)
+		logs = append(logs, "SECURITY: VM ID validation failed - potential injection attempt")
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+	logs = append(logs, "VM ID validation passed")
+
+	// Use the most compatible approach: get VM object first, then operate on it
+	// This works across all Windows versions and Hyper-V versions
+	var additionalParams string
+
+	switch powershellCmd {
+	case "Stop-VM":
+		additionalParams = " -Force"
+	default:
+		additionalParams = ""
+	}
+
+	// Sanitize VM ID for PowerShell execution
+	sanitizedVMID := sanitizeForPowerShell(vmID)
+
+	script := fmt.Sprintf(`
+	try {
+		# Get the VM object by ID (most compatible approach) - using sanitized input
+		$vm = Get-VM -Id '%s' -ErrorAction Stop
+		
+		# Use the VM object with the command (most compatible)
+		%s -VM $vm%s -ErrorAction Stop
+		Write-Output "SUCCESS"
+	} catch {
+		Write-Output "ERROR:$($_.Exception.Message)"
+	}
+	`, sanitizedVMID, powershellCmd, additionalParams)
+
+	logs = append(logs, fmt.Sprintf("Executing %s operation with sanitized VM ID", operation))
+	cmd := exec.Command("powershell", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		errorMsg := fmt.Sprintf("Failed to %s VM: %v", operation, err)
+		logs = append(logs, errorMsg)
+
+		result := map[string]interface{}{
+			"success": false,
+			"vm_id":   vmID,
+			"error":   errorMsg,
+		}
+
+		return CommandResult{
+			Result: result,
+			Logs:   strings.Join(logs, "\n"),
+			Status: "error",
+		}
+	}
+
+	result := strings.TrimSpace(string(output))
+	if result == "SUCCESS" {
+		logs = append(logs, fmt.Sprintf("VM %s operation completed successfully", operation))
+
+		resultData := map[string]interface{}{
+			"success":   true,
+			"vm_id":     vmID,
+			"operation": operation,
+			"message":   fmt.Sprintf("VM %s completed successfully", operation),
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"method":    "secure_powershell_operation",
+		}
+
+		return CommandResult{
+			Result: resultData,
+			Logs:   strings.Join(logs, "\n"),
+			Status: "success",
+		}
+	} else if strings.HasPrefix(result, "ERROR:") {
+		errorMsg := strings.TrimPrefix(result, "ERROR:")
+		logs = append(logs, fmt.Sprintf("VM %s failed: %s", operation, errorMsg))
+
+		resultData := map[string]interface{}{
+			"success": false,
+			"vm_id":   vmID,
+			"error":   fmt.Sprintf("Failed to %s VM: %s", operation, errorMsg),
+		}
+
+		return CommandResult{
+			Result: resultData,
+			Logs:   strings.Join(logs, "\n"),
+			Status: "error",
+		}
+	}
+
+	errorMsg := fmt.Sprintf("Unknown error occurred during VM %s", operation)
+	logs = append(logs, errorMsg)
+
+	resultData := map[string]interface{}{
+		"success": false,
+		"vm_id":   vmID,
+		"error":   errorMsg,
+	}
+
+	return CommandResult{
+		Result: resultData,
+		Logs:   strings.Join(logs, "\n"),
+		Status: "error",
+	}
+}
+
+// executeHyperVShutdown gracefully shuts down a VM with security validation
+func executeHyperVShutdown(params map[string]interface{}) CommandResult {
+	var logs []string
+	logs = append(logs, "Hyper-V shutdown operation initiated with security validation")
+
+	if runtime.GOOS != "windows" {
+		errorMsg := "Hyper-V commands are only supported on Windows"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+
+	if params == nil {
+		errorMsg := "VM ID parameter is required"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+
+	vmID, ok := params["vm_id"].(string)
+	if !ok || vmID == "" {
+		errorMsg := "Valid VM ID parameter is required"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+
+	// SECURITY: Validate VM ID to prevent injection
+	logs = append(logs, "Validating VM ID format for security")
+	if err := validateVMID(vmID); err != nil {
+		errorMsg := fmt.Sprintf("Invalid VM ID: %v", err)
+		logs = append(logs, errorMsg)
+		logs = append(logs, "SECURITY: VM ID validation failed - potential injection attempt")
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+	logs = append(logs, "VM ID validation passed")
+
+	// Use Stop-VM with graceful shutdown using VM object with sanitized input
+	sanitizedVMID := sanitizeForPowerShell(vmID)
+	script := fmt.Sprintf(`
+	try {
+		$vm = Get-VM -Id '%s' -ErrorAction Stop
+		Stop-VM -VM $vm -Force:$false -ErrorAction Stop
+		Write-Output "SUCCESS"
+	} catch {
+		Write-Output "ERROR:$($_.Exception.Message)"
+	}
+	`, sanitizedVMID)
+
+	logs = append(logs, "Executing graceful shutdown with sanitized VM ID")
+	cmd := exec.Command("powershell", "-Command", script)
+	output, err := cmd.Output()
+
+	if err != nil {
+		errorMsg := fmt.Sprintf("Failed to shutdown VM: %v", err)
+		logs = append(logs, errorMsg)
+
+		result := map[string]interface{}{
+			"success": false,
+			"vm_id":   vmID,
+			"error":   errorMsg,
+		}
+
+		return CommandResult{
+			Result: result,
+			Logs:   strings.Join(logs, "\n"),
+			Status: "error",
+		}
+	}
+
+	result := strings.TrimSpace(string(output))
+	if result == "SUCCESS" {
+		// Update database state
+		if err := updateVMState("", vmID, "Off"); err != nil {
+			logs = append(logs, fmt.Sprintf("Warning: Failed to update VM state in database: %v", err))
+		}
+
+		logs = append(logs, "VM graceful shutdown completed successfully")
+
+		resultData := map[string]interface{}{
+			"success":   true,
+			"vm_id":     vmID,
+			"operation": "shutdown",
+			"message":   "VM shutdown initiated successfully",
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"method":    "secure_graceful_shutdown",
+		}
+
+		return CommandResult{
+			Result: resultData,
+			Logs:   strings.Join(logs, "\n"),
+			Status: "success",
+		}
+	} else if strings.HasPrefix(result, "ERROR:") {
+		errorMsg := strings.TrimPrefix(result, "ERROR:")
+		logs = append(logs, fmt.Sprintf("VM shutdown failed: %s", errorMsg))
+
+		resultData := map[string]interface{}{
+			"success": false,
+			"vm_id":   vmID,
+			"error":   fmt.Sprintf("Failed to shutdown VM: %s", errorMsg),
+		}
+
+		return CommandResult{
+			Result: resultData,
+			Logs:   strings.Join(logs, "\n"),
+			Status: "error",
+		}
+	}
+
+	errorMsg := "Unknown error occurred during VM shutdown"
+	logs = append(logs, errorMsg)
+
+	resultData := map[string]interface{}{
+		"success": false,
+		"vm_id":   vmID,
+		"error":   errorMsg,
+	}
+
+	return CommandResult{
+		Result: resultData,
+		Logs:   strings.Join(logs, "\n"),
+		Status: "error",
+	}
+}
+
+// Secure wrapper functions that now call the secure executeHyperVOperation
 func executeHyperVStart(params map[string]interface{}) CommandResult {
 	result := executeHyperVOperation(params, "Start-VM", "start", "running")
 
@@ -493,7 +763,6 @@ func executeHyperVStart(params map[string]interface{}) CommandResult {
 	return result
 }
 
-// executeHyperVPause pauses a VM and updates database
 func executeHyperVPause(params map[string]interface{}) CommandResult {
 	result := executeHyperVOperation(params, "Suspend-VM", "pause", "paused")
 
@@ -509,7 +778,6 @@ func executeHyperVPause(params map[string]interface{}) CommandResult {
 	return result
 }
 
-// executeHyperVReset resets a VM and updates database
 func executeHyperVReset(params map[string]interface{}) CommandResult {
 	result := executeHyperVOperation(params, "Reset-VM", "reset", "reset")
 
@@ -525,7 +793,6 @@ func executeHyperVReset(params map[string]interface{}) CommandResult {
 	return result
 }
 
-// executeHyperVTurnOff turns off a VM and updates database
 func executeHyperVTurnOff(params map[string]interface{}) CommandResult {
 	result := executeHyperVOperation(params, "Stop-VM", "turn off", "stopped")
 
@@ -539,203 +806,6 @@ func executeHyperVTurnOff(params map[string]interface{}) CommandResult {
 	}
 
 	return result
-}
-
-// executeHyperVShutdown gracefully shuts down a VM and updates database
-func executeHyperVShutdown(params map[string]interface{}) CommandResult {
-	if runtime.GOOS != "windows" {
-		return CommandResult{
-			Output: map[string]string{"error": "Hyper-V commands are only supported on Windows"},
-			Error:  "Hyper-V commands are only supported on Windows",
-			Status: "error",
-		}
-	}
-
-	if params == nil {
-		return CommandResult{
-			Output: map[string]string{"error": "VM ID parameter is required"},
-			Error:  "VM ID parameter is required",
-			Status: "error",
-		}
-	}
-
-	vmID, ok := params["vm_id"].(string)
-	if !ok || vmID == "" {
-		return CommandResult{
-			Output: map[string]string{"error": "Valid VM ID parameter is required"},
-			Error:  "Valid VM ID parameter is required",
-			Status: "error",
-		}
-	}
-
-	// Use Stop-VM with graceful shutdown using VM object
-	script := fmt.Sprintf(`
-	try {
-		$vm = Get-VM -Id '%s' -ErrorAction Stop
-		Stop-VM -VM $vm -Force:$false -ErrorAction Stop
-		Write-Output "SUCCESS"
-	} catch {
-		Write-Output "ERROR:$($_.Exception.Message)"
-	}
-	`, vmID)
-
-	cmd := exec.Command("powershell", "-Command", script)
-	output, err := cmd.Output()
-
-	if err != nil {
-		return CommandResult{
-			Output: map[string]interface{}{
-				"success": false,
-				"vm_id":   vmID,
-				"error":   fmt.Sprintf("Failed to shutdown VM: %v", err),
-			},
-			Error:  fmt.Sprintf("Failed to shutdown VM: %v", err),
-			Status: "error",
-		}
-	}
-
-	result := strings.TrimSpace(string(output))
-	if result == "SUCCESS" {
-		// Update database state
-		if err := updateVMState("", vmID, "Off"); err != nil {
-			log.Printf("Failed to update VM state in database: %v", err)
-		}
-
-		return CommandResult{
-			Output: map[string]interface{}{
-				"success":   true,
-				"vm_id":     vmID,
-				"operation": "shutdown",
-				"message":   "VM shutdown initiated successfully",
-				"timestamp": time.Now().UTC().Format(time.RFC3339),
-			},
-			Error:  "",
-			Status: "success",
-		}
-	} else if strings.HasPrefix(result, "ERROR:") {
-		errorMsg := strings.TrimPrefix(result, "ERROR:")
-		return CommandResult{
-			Output: map[string]interface{}{
-				"success": false,
-				"vm_id":   vmID,
-				"error":   fmt.Sprintf("Failed to shutdown VM: %s", errorMsg),
-			},
-			Error:  fmt.Sprintf("Failed to shutdown VM: %s", errorMsg),
-			Status: "error",
-		}
-	}
-
-	return CommandResult{
-		Output: map[string]interface{}{
-			"success": false,
-			"vm_id":   vmID,
-			"error":   "Unknown error occurred during VM shutdown",
-		},
-		Error:  "Unknown error occurred during VM shutdown",
-		Status: "error",
-	}
-}
-
-// executeHyperVOperation is a generic function for VM operations
-func executeHyperVOperation(params map[string]interface{}, powershellCmd, operation, resultState string) CommandResult {
-	if runtime.GOOS != "windows" {
-		return CommandResult{
-			Output: map[string]string{"error": "Hyper-V commands are only supported on Windows"},
-			Error:  "Hyper-V commands are only supported on Windows",
-			Status: "error",
-		}
-	}
-
-	if params == nil {
-		return CommandResult{
-			Output: map[string]string{"error": "VM ID parameter is required"},
-			Error:  "VM ID parameter is required",
-			Status: "error",
-		}
-	}
-
-	vmID, ok := params["vm_id"].(string)
-	if !ok || vmID == "" {
-		return CommandResult{
-			Output: map[string]string{"error": "Valid VM ID parameter is required"},
-			Error:  "Valid VM ID parameter is required",
-			Status: "error",
-		}
-	}
-
-	// Use the most compatible approach: get VM object first, then operate on it
-	// This works across all Windows versions and Hyper-V versions
-	var additionalParams string
-
-	switch powershellCmd {
-	case "Stop-VM":
-		additionalParams = " -Force"
-	default:
-		additionalParams = ""
-	}
-
-	script := fmt.Sprintf(`
-	try {
-		# Get the VM object by ID (most compatible approach)
-		$vm = Get-VM -Id '%s' -ErrorAction Stop
-		
-		# Use the VM object with the command (most compatible)
-		%s -VM $vm%s -ErrorAction Stop
-		Write-Output "SUCCESS"
-	} catch {
-		Write-Output "ERROR:$($_.Exception.Message)"
-	}
-	`, vmID, powershellCmd, additionalParams)
-
-	cmd := exec.Command("powershell", "-Command", script)
-	output, err := cmd.Output()
-	if err != nil {
-		return CommandResult{
-			Output: map[string]interface{}{
-				"success": false,
-				"vm_id":   vmID,
-				"error":   fmt.Sprintf("Failed to %s VM: %v", operation, err),
-			},
-			Error:  fmt.Sprintf("Failed to %s VM: %v", operation, err),
-			Status: "error",
-		}
-	}
-
-	result := strings.TrimSpace(string(output))
-	if result == "SUCCESS" {
-		return CommandResult{
-			Output: map[string]interface{}{
-				"success":   true,
-				"vm_id":     vmID,
-				"operation": operation,
-				"message":   fmt.Sprintf("VM %s completed successfully", operation),
-				"timestamp": time.Now().UTC().Format(time.RFC3339),
-			},
-			Error:  "",
-			Status: "success",
-		}
-	} else if strings.HasPrefix(result, "ERROR:") {
-		errorMsg := strings.TrimPrefix(result, "ERROR:")
-		return CommandResult{
-			Output: map[string]interface{}{
-				"success": false,
-				"vm_id":   vmID,
-				"error":   fmt.Sprintf("Failed to %s VM: %s", operation, errorMsg),
-			},
-			Error:  fmt.Sprintf("Failed to %s VM: %s", operation, errorMsg),
-			Status: "error",
-		}
-	}
-
-	return CommandResult{
-		Output: map[string]interface{}{
-			"success": false,
-			"vm_id":   vmID,
-			"error":   fmt.Sprintf("Unknown error occurred during VM %s", operation),
-		},
-		Error:  fmt.Sprintf("Unknown error occurred during VM %s", operation),
-		Status: "error",
-	}
 }
 
 // executeHyperVGetVMsFromDB gets VMs from database with enhanced logging
