@@ -165,77 +165,67 @@ var (
 
 // captureScreen - Main entry point with WTS detection
 func captureScreen(params map[string]interface{}) CommandResult {
+	var logs []string
+	logs = append(logs, "Screen capture command initiated")
+
 	sessionID, hasSessionID := params["session_id"].(string)
 	username, hasUsername := params["username"].(string)
 
 	if !hasSessionID && !hasUsername {
-		return CommandResult{
-			Output: map[string]string{"error": "Either session_id or username parameter is required"},
-			Error:  "Either session_id or username parameter is required",
-			Status: "error",
-		}
+		errorMsg := "Either session_id or username parameter is required"
+		logs = append(logs, errorMsg)
+		return createScreenCaptureError(errorMsg, logs)
 	}
 
 	// If username provided, find session ID
 	if hasUsername && !hasSessionID {
+		logs = append(logs, fmt.Sprintf("Looking up session ID for username: %s", username))
 		sessionID = findSessionByUsername(username)
 		if sessionID == "" {
-			return CommandResult{
-				Output: map[string]string{"error": fmt.Sprintf("No session found for user: %s", username)},
-				Error:  fmt.Sprintf("No session found for user: %s", username),
-				Status: "error",
-			}
+			errorMsg := fmt.Sprintf("No session found for user: %s", username)
+			logs = append(logs, errorMsg)
+			return createScreenCaptureError(errorMsg, logs)
 		}
+		logs = append(logs, fmt.Sprintf("Found session ID: %s for username: %s", sessionID, username))
 	}
 
 	timestamp := time.Now().Format("20060102_150405")
 	currentUser := os.Getenv("USERNAME")
 	isSystemUser := isRunningAsSystem()
 
-	debugInfo := fmt.Sprintf("DEBUG INFO:\n- Current user: %s\n- Is SYSTEM: %t\n- Session ID: %s\n- Timestamp: %s\n",
-		currentUser, isSystemUser, sessionID, timestamp)
+	logs = append(logs, fmt.Sprintf("Current user: %s, Is SYSTEM: %t, Target session: %s", currentUser, isSystemUser, sessionID))
 
 	// Get session information to determine capture method
 	sessionInfo, err := getSessionInfo(sessionID)
 	if err != nil {
-		return CommandResult{
-			Output: map[string]string{"error": fmt.Sprintf("Failed to get session info: %v", err)},
-			Error:  fmt.Sprintf("Failed to get session info: %v", err),
-			Status: "error",
-		}
+		errorMsg := fmt.Sprintf("Failed to get session info: %v", err)
+		logs = append(logs, errorMsg)
+		return createScreenCaptureError(errorMsg, logs)
 	}
 
-	debugInfo += fmt.Sprintf("- Session Type: %s\n- Session State: %s\n", sessionInfo.SessionType, sessionInfo.State)
+	logs = append(logs, fmt.Sprintf("Session type: %s, Session state: %s", sessionInfo.SessionType, sessionInfo.State))
 
-	// Choose capture method based on session type and current context
+	// Choose capture method based on session type and current context - PRESERVE EXISTING LOGIC
+	var result CommandResult
 	if sessionInfo.IsRDPSession() && isSystemUser {
-		// Use WTS API for RDP/Terminal Server/AVD sessions
-		result := captureScreenWTS(sessionID, timestamp, sessionInfo)
-		if result.Output != nil {
-			if output, ok := result.Output.(map[string]interface{}); ok {
-				output["debug_info"] = debugInfo + "- Path taken: WTS API for RDP session"
-			}
-		}
-		return result
+		logs = append(logs, "Using WTS API approach for RDP session")
+		result = captureScreenWTS(sessionID, timestamp, sessionInfo)
 	} else if isSystemUser {
-		// Use helper executable approach for console sessions from service
-		result := captureScreenViaHelper(sessionID, timestamp)
-		if result.Output != nil {
-			if output, ok := result.Output.(map[string]interface{}); ok {
-				output["debug_info"] = debugInfo + "- Path taken: Helper executable approach"
-			}
-		}
-		return result
+		logs = append(logs, "Using helper executable approach for console session from service")
+		result = captureScreenViaHelper(sessionID, timestamp)
 	} else {
-		// Direct capture (running as user)
-		result := captureScreenDirect(sessionID, timestamp)
-		if result.Output != nil {
-			if output, ok := result.Output.(map[string]interface{}); ok {
-				output["debug_info"] = debugInfo + "- Path taken: Direct capture approach"
-			}
-		}
-		return result
+		logs = append(logs, "Using direct capture approach")
+		result = captureScreenDirect(sessionID, timestamp)
 	}
+
+	// SAFELY add our logs to existing result without breaking anything
+	if result.Logs == "" {
+		result.Logs = strings.Join(logs, "\n")
+	} else {
+		result.Logs = strings.Join(logs, "\n") + "\n\n" + result.Logs
+	}
+
+	return result
 }
 
 // handleScreenCaptureHelper - Cross-platform wrapper
@@ -982,50 +972,70 @@ func launchHelperInSession(exePath, sessionID, outputPath string) CommandResult 
 	}
 }
 
-// createHelperFailureResult creates a failure result for helper launching
+// createHelperFailureResult creates a failure result for helper launching with enhanced logging
 func createHelperFailureResult(diagnostics []string, errorMsg string) CommandResult {
 	diagnosticsText := strings.Join(diagnostics, "\n")
 
+	logs := []string{
+		"Helper process launch failed",
+		fmt.Sprintf("Error: %s", errorMsg),
+		"",
+		"Diagnostics:",
+		diagnosticsText,
+	}
+
+	result := map[string]interface{}{
+		"error":       errorMsg,
+		"diagnostics": diagnosticsText,
+		"method":      "Helper Process Launch",
+		"success":     false,
+	}
+
 	return CommandResult{
-		Output: map[string]interface{}{
-			"error":       errorMsg,
-			"diagnostics": diagnosticsText,
-			"method":      "Helper Process Launch",
-		},
-		Error:  fmt.Sprintf("HELPER LAUNCH FAILED:\n\n%s\n\nError: %s", diagnosticsText, errorMsg),
+		Result: result,
+		Logs:   strings.Join(logs, "\n"),
 		Status: "error",
 	}
 }
 
-// waitForHelperAndReadResult waits for helper completion and reads the result
+// waitForHelperAndReadResult waits for helper completion and reads the result with enhanced logging
 func waitForHelperAndReadResult(outputPath, sessionID, timestamp string) CommandResult {
+	var logs []string
+	logs = append(logs, "Waiting for helper executable to complete")
+	logs = append(logs, fmt.Sprintf("Monitoring output file: %s", outputPath))
+
 	timeout := 30 * time.Second
 	start := time.Now()
 
 	for time.Since(start) < timeout {
 		if _, err := os.Stat(outputPath); err == nil {
+			logs = append(logs, "Output file detected, reading screenshot data")
+
 			imageData, err := os.ReadFile(outputPath)
 			if err != nil {
-				return CommandResult{
-					Output: map[string]string{"error": fmt.Sprintf("Failed to read result file: %v", err)},
-					Error:  fmt.Sprintf("Failed to read result file: %v", err),
-					Status: "error",
-				}
+				errorMsg := fmt.Sprintf("Failed to read result file: %v", err)
+				logs = append(logs, errorMsg)
+				return createScreenCaptureError(errorMsg, logs)
 			}
 
 			os.Remove(outputPath)
+			logs = append(logs, "Temporary file cleaned up")
+
 			base64Image := base64.StdEncoding.EncodeToString(imageData)
+			logs = append(logs, fmt.Sprintf("Successfully captured screenshot: %d bytes", len(imageData)))
+
+			result := map[string]interface{}{
+				"success":           true,
+				"session_id":        sessionID,
+				"image_size_bytes":  len(imageData),
+				"image_base64_size": len(base64Image),
+				"timestamp":         timestamp,
+				"method":            "Helper Executable",
+			}
 
 			return CommandResult{
-				Output: map[string]interface{}{
-					"success":           true,
-					"session_id":        sessionID,
-					"image_size_bytes":  len(imageData),
-					"image_base64_size": len(base64Image),
-					"timestamp":         timestamp,
-					"method":            "Helper Executable",
-				},
-				Error:          "",
+				Result:         result,
+				Logs:           strings.Join(logs, "\n"),
 				Status:         "success",
 				ScreenshotData: base64Image,
 			}
@@ -1033,11 +1043,10 @@ func waitForHelperAndReadResult(outputPath, sessionID, timestamp string) Command
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	return CommandResult{
-		Output: map[string]string{"error": "Helper executable timeout - no result file created"},
-		Error:  "Helper executable timeout",
-		Status: "error",
-	}
+	errorMsg := "Helper executable timeout - no result file created"
+	logs = append(logs, errorMsg)
+	logs = append(logs, fmt.Sprintf("Waited %v for output file", timeout))
+	return createScreenCaptureError(errorMsg, logs)
 }
 
 // captureScreenNative performs screen capture using pure Windows API calls
@@ -1343,21 +1352,51 @@ func getScreenDimensions(diagnostics *[]string) ScreenInfo {
 	return info
 }
 
-// createFailureResult creates a standardized failure result
+// createFailureResult creates a standardized failure result with enhanced logging
 func createFailureResult(diagnostics []string, errorMsg string) CommandResult {
 	diagnosticsText := strings.Join(diagnostics, "\n")
 	currentUser := os.Getenv("USERNAME")
 	isSystemUser := isRunningAsSystem()
-	debugInfo := fmt.Sprintf("\n\nDEBUG INFO:\n- Current user: %s\n- Is SYSTEM: %t\n", currentUser, isSystemUser)
+
+	logs := []string{
+		"Native screen capture failed",
+		fmt.Sprintf("Error: %s", errorMsg),
+		"",
+		fmt.Sprintf("Debug Info - Current user: %s, Is SYSTEM: %t", currentUser, isSystemUser),
+		"",
+		"Diagnostics:",
+		diagnosticsText,
+	}
+
+	result := map[string]interface{}{
+		"error":       errorMsg,
+		"diagnostics": diagnosticsText,
+		"method":      "Native Windows API",
+		"debug_info":  fmt.Sprintf("Current user: %s, Is SYSTEM: %t", currentUser, isSystemUser),
+		"success":     false,
+	}
 
 	return CommandResult{
-		Output: map[string]interface{}{
-			"error":       errorMsg,
-			"diagnostics": diagnosticsText,
-			"method":      "Native Windows API",
-			"debug_info":  debugInfo,
-		},
-		Error:  fmt.Sprintf("NATIVE SCREEN CAPTURE FAILED:\n\n%s\n\nError: %s%s", diagnosticsText, errorMsg, debugInfo),
+		Result: result,
+		Logs:   strings.Join(logs, "\n"),
 		Status: "error",
 	}
+}
+
+// createScreenCaptureSuccess creates a success result for screen capture with logs
+func createScreenCaptureSuccess(sessionID, timestamp string, imageData string, metadata map[string]interface{}, logs []string) CommandResult {
+	result := NewSuccessResult(metadata)
+	result.ScreenshotData = imageData
+	if len(logs) > 0 {
+		result.Logs = strings.Join(logs, "\n")
+	}
+	return result
+}
+
+// createScreenCaptureError creates an error result for screen capture with logs
+func createScreenCaptureError(errorMsg string, logs []string) CommandResult {
+	if len(logs) > 0 {
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+	}
+	return NewErrorResult(errorMsg)
 }

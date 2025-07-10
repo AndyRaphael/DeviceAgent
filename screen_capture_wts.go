@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -409,20 +410,33 @@ func launchWTSHelperInSession(exePath string, sessionIDInt uint32, sessionID, ou
 	}
 }
 
-// createWTSFailureResult creates a failure result for WTS operations
+// createWTSFailureResult creates a failure result for WTS operations with enhanced logging
 func createWTSFailureResult(errorMsg string) CommandResult {
+	logs := []string{
+		"WTS screen capture operation failed",
+		fmt.Sprintf("Error: %s", errorMsg),
+		"Method: WTS API",
+	}
+
+	result := map[string]interface{}{
+		"error":   errorMsg,
+		"method":  "WTS API",
+		"success": false,
+	}
+
 	return CommandResult{
-		Output: map[string]interface{}{
-			"error":  errorMsg,
-			"method": "WTS API",
-		},
-		Error:  fmt.Sprintf("WTS SCREEN CAPTURE FAILED: %s", errorMsg),
+		Result: result,
+		Logs:   strings.Join(logs, "\n"),
 		Status: "error",
 	}
 }
 
-// waitForWTSHelperAndReadResult waits for helper completion and reads result
+// waitForWTSHelperAndReadResult waits for helper completion and reads result - SAFE UPDATE
 func waitForWTSHelperAndReadResult(outputPath, sessionID, timestamp string) CommandResult {
+	var logs []string
+	logs = append(logs, "Waiting for WTS helper process to complete")
+	logs = append(logs, fmt.Sprintf("Monitoring output file: %s", outputPath))
+
 	timeout := 75 * time.Second
 	start := time.Now()
 	checkInterval := 1 * time.Second
@@ -430,6 +444,7 @@ func waitForWTSHelperAndReadResult(outputPath, sessionID, timestamp string) Comm
 	for time.Since(start) < timeout {
 		if stat, err := os.Stat(outputPath); err == nil {
 			currentSize := stat.Size()
+			logs = append(logs, fmt.Sprintf("Output file found, size: %d bytes", currentSize))
 
 			// Wait for file to be reasonably sized
 			if currentSize > 1000 {
@@ -441,36 +456,44 @@ func waitForWTSHelperAndReadResult(outputPath, sessionID, timestamp string) Comm
 					finalSize := finalStat.Size()
 
 					if finalSize < 100 {
-						// Continue waiting
+						logs = append(logs, "File too small, continuing to wait")
 						time.Sleep(checkInterval)
 						continue
 					}
 
 					imageData, err := os.ReadFile(outputPath)
 					if err != nil {
-						return createWTSFailureResult(fmt.Sprintf("Failed to read result file: %v", err))
+						errorMsg := fmt.Sprintf("Failed to read result file: %v", err)
+						logs = append(logs, errorMsg)
+						return createScreenCaptureError(errorMsg, logs)
 					}
 
 					// Validate image data
 					if len(imageData) < 100 {
-						return createWTSFailureResult("Result file too small - corrupted or incomplete")
+						errorMsg := "Result file too small - corrupted or incomplete"
+						logs = append(logs, errorMsg)
+						return createScreenCaptureError(errorMsg, logs)
 					}
 
 					// Clean up the temporary file
 					os.Remove(outputPath)
+					logs = append(logs, "Temporary file cleaned up")
 
 					base64Image := base64.StdEncoding.EncodeToString(imageData)
+					logs = append(logs, fmt.Sprintf("Successfully captured screenshot: %d bytes", len(imageData)))
+
+					result := map[string]interface{}{
+						"success":           true,
+						"session_id":        sessionID,
+						"image_size_bytes":  len(imageData),
+						"image_base64_size": len(base64Image),
+						"timestamp":         timestamp,
+						"method":            "WTS Helper",
+					}
 
 					return CommandResult{
-						Output: map[string]interface{}{
-							"success":           true,
-							"session_id":        sessionID,
-							"image_size_bytes":  len(imageData),
-							"image_base64_size": len(base64Image),
-							"timestamp":         timestamp,
-							"method":            "WTS Helper",
-						},
-						Error:          "",
+						Result:         result,
+						Logs:           strings.Join(logs, "\n"),
 						Status:         "success",
 						ScreenshotData: base64Image,
 					}
@@ -481,5 +504,8 @@ func waitForWTSHelperAndReadResult(outputPath, sessionID, timestamp string) Comm
 		time.Sleep(checkInterval)
 	}
 
-	return createWTSFailureResult("Helper result timeout - no output file created")
+	errorMsg := "Helper result timeout - no output file created"
+	logs = append(logs, errorMsg)
+	logs = append(logs, fmt.Sprintf("Waited %v for output file", timeout))
+	return createScreenCaptureError(errorMsg, logs)
 }

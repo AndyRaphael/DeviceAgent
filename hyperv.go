@@ -22,34 +22,36 @@ type HyperVVM struct {
 	Uptime           string `json:"uptime,omitempty"`
 }
 
-// executeHyperVInventory gets an inventory of all virtual machines and updates the database
+// executeHyperVInventory gets an inventory of all virtual machines with enhanced logging
 func executeHyperVInventory() CommandResult {
+	var logs []string
+	logs = append(logs, "Starting Hyper-V inventory collection")
+
 	if runtime.GOOS != "windows" {
-		return CommandResult{
-			Output: map[string]string{"error": "Hyper-V commands are only supported on Windows"},
-			Error:  "Hyper-V commands are only supported on Windows",
-			Status: "error",
-		}
+		errorMsg := "Hyper-V commands are only supported on Windows"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	// Check if Hyper-V is available
+	logs = append(logs, "Checking Hyper-V availability")
 	if !isHyperVAvailable() {
-		return CommandResult{
-			Output: map[string]string{"error": "Hyper-V is not available or enabled on this system"},
-			Error:  "Hyper-V is not available or enabled on this system",
-			Status: "error",
-		}
+		errorMsg := "Hyper-V is not available or enabled on this system"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
+	logs = append(logs, "Hyper-V is available and accessible")
 
 	// Get VMs from PowerShell (existing logic)
+	logs = append(logs, "Retrieving VM data from PowerShell")
 	vms, err := getVMsFromPowerShell()
 	if err != nil {
-		return CommandResult{
-			Output: map[string]string{"error": fmt.Sprintf("Failed to get VM inventory: %v", err)},
-			Error:  fmt.Sprintf("Failed to get VM inventory: %v", err),
-			Status: "error",
-		}
+		errorMsg := fmt.Sprintf("Failed to get VM inventory: %v", err)
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
+
+	logs = append(logs, fmt.Sprintf("Successfully retrieved %d virtual machines", len(vms)))
 
 	// Return result with both live data and database update status
 	result := map[string]interface{}{
@@ -57,13 +59,10 @@ func executeHyperVInventory() CommandResult {
 		"total_count":      len(vms),
 		"timestamp":        time.Now().UTC().Format(time.RFC3339),
 		"source":           "live_powershell",
+		"method":           "hyperv_powershell",
 	}
 
-	return CommandResult{
-		Output: result,
-		Error:  "",
-		Status: "success",
-	}
+	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
 }
 
 // getVMsFromPowerShell extracts the PowerShell logic into a separate function
@@ -139,40 +138,46 @@ func getVMsFromPowerShell() ([]HyperVVM, error) {
 	return vms, nil
 }
 
-// executeHyperVInventoryWithDB gets inventory and updates database (new command)
+// executeHyperVInventoryWithDB gets inventory and updates database with enhanced logging
 func executeHyperVInventoryWithDB(jwtToken string) CommandResult {
+	var logs []string
+	logs = append(logs, "Starting Hyper-V inventory with database update")
+
 	if runtime.GOOS != "windows" {
-		return CommandResult{
-			Output: map[string]string{"error": "Hyper-V commands are only supported on Windows"},
-			Error:  "Hyper-V commands are only supported on Windows",
-			Status: "error",
-		}
+		errorMsg := "Hyper-V commands are only supported on Windows"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	// Check if Hyper-V is available
+	logs = append(logs, "Checking Hyper-V availability")
 	if !isHyperVAvailable() {
-		return CommandResult{
-			Output: map[string]string{"error": "Hyper-V is not available or enabled on this system"},
-			Error:  "Hyper-V is not available or enabled on this system",
-			Status: "error",
-		}
+		errorMsg := "Hyper-V is not available or enabled on this system"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
+	logs = append(logs, "Hyper-V is available and accessible")
 
 	// Get VMs from PowerShell
+	logs = append(logs, "Retrieving VM data from PowerShell")
 	vms, err := getVMsFromPowerShell()
 	if err != nil {
-		return CommandResult{
-			Output: map[string]string{"error": fmt.Sprintf("Failed to get VM inventory: %v", err)},
-			Error:  fmt.Sprintf("Failed to get VM inventory: %v", err),
-			Status: "error",
-		}
+		errorMsg := fmt.Sprintf("Failed to get VM inventory: %v", err)
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
+
+	logs = append(logs, fmt.Sprintf("Successfully retrieved %d virtual machines from PowerShell", len(vms)))
 
 	// Update database with current inventory
 	dbUpdateError := ""
+	logs = append(logs, "Updating database with VM inventory")
 	if err := updateVMDatabase(jwtToken, deviceID, vms); err != nil {
 		dbUpdateError = fmt.Sprintf("Database update failed: %v", err)
+		logs = append(logs, dbUpdateError)
 		log.Printf("Database update error: %v", err)
+	} else {
+		logs = append(logs, "Database updated successfully")
 	}
 
 	// Return result with both live data and database update status
@@ -182,17 +187,15 @@ func executeHyperVInventoryWithDB(jwtToken string) CommandResult {
 		"timestamp":        time.Now().UTC().Format(time.RFC3339),
 		"source":           "live_powershell_with_db_update",
 		"database_updated": dbUpdateError == "",
+		"method":           "hyperv_powershell_with_db",
 	}
 
 	if dbUpdateError != "" {
 		result["database_error"] = dbUpdateError
+		logs = append(logs, "Warning: Database update failed but VM data was retrieved successfully")
 	}
 
-	return CommandResult{
-		Output: result,
-		Error:  "",
-		Status: "success",
-	}
+	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
 }
 
 // executeHyperVScreenshot captures actual VM screen content using Hyper-V WMI
@@ -735,75 +738,85 @@ func executeHyperVOperation(params map[string]interface{}, powershellCmd, operat
 	}
 }
 
-// executeHyperVGetVMsFromDB gets VMs from database (fast query)
+// executeHyperVGetVMsFromDB gets VMs from database with enhanced logging
 func executeHyperVGetVMsFromDB(jwtToken string) CommandResult {
+	var logs []string
+	logs = append(logs, "Retrieving VMs from database (fast query)")
+
 	if jwtToken == "" {
-		return CommandResult{
-			Output: map[string]string{"error": "JWT token required for database operations"},
-			Error:  "JWT token required for database operations",
-			Status: "error",
-		}
+		errorMsg := "JWT token required for database operations"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	// Get VMs from database
+	logs = append(logs, "Querying VM database")
 	vms, err := getVMsFromDatabase(jwtToken, deviceID, false)
 	if err != nil {
-		return CommandResult{
-			Output: map[string]string{"error": fmt.Sprintf("Failed to get VMs from database: %v", err)},
-			Error:  fmt.Sprintf("Failed to get VMs from database: %v", err),
-			Status: "error",
-		}
+		errorMsg := fmt.Sprintf("Failed to get VMs from database: %v", err)
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
-	return CommandResult{
-		Output: map[string]interface{}{
-			"virtual_machines": vms,
-			"total_count":      len(vms),
-			"timestamp":        time.Now().UTC().Format(time.RFC3339),
-			"source":           "database",
-		},
-		Error:  "",
-		Status: "success",
+	logs = append(logs, fmt.Sprintf("Successfully retrieved %d VMs from database", len(vms)))
+
+	result := map[string]interface{}{
+		"virtual_machines": vms,
+		"total_count":      len(vms),
+		"timestamp":        time.Now().UTC().Format(time.RFC3339),
+		"source":           "database",
+		"method":           "database_query",
 	}
+
+	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
 }
 
-// executeHyperVSyncAndGet does a full sync (PowerShell + DB update) then returns DB data
+// executeHyperVSyncAndGet does a full sync then returns DB data with enhanced logging
 func executeHyperVSyncAndGet(jwtToken string) CommandResult {
+	var logs []string
+	logs = append(logs, "Starting full VM sync and retrieval")
+
 	if jwtToken == "" {
-		return CommandResult{
-			Output: map[string]string{"error": "JWT token required for database operations"},
-			Error:  "JWT token required for database operations",
-			Status: "error",
-		}
+		errorMsg := "JWT token required for database operations"
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
 	// First sync with PowerShell
+	logs = append(logs, "Phase 1: Syncing with PowerShell")
 	syncResult := executeHyperVInventoryWithDB(jwtToken)
 	if syncResult.Status != "success" {
-		return syncResult // Return the sync error
+		logs = append(logs, "PowerShell sync failed")
+		// Add sync logs to our logs
+		if syncResult.Logs != "" {
+			logs = append(logs, "Sync operation logs:")
+			logs = append(logs, syncResult.Logs)
+		}
+		return NewErrorResultWithDetails("Sync operation failed", strings.Join(logs, "\n"))
 	}
+	logs = append(logs, "PowerShell sync completed successfully")
 
 	// Then get updated data from database
+	logs = append(logs, "Phase 2: Retrieving updated data from database")
 	vms, err := getVMsFromDatabase(jwtToken, deviceID, false)
 	if err != nil {
-		return CommandResult{
-			Output: map[string]string{"error": fmt.Sprintf("Failed to get VMs from database after sync: %v", err)},
-			Error:  fmt.Sprintf("Failed to get VMs from database after sync: %v", err),
-			Status: "error",
-		}
+		errorMsg := fmt.Sprintf("Failed to get VMs from database after sync: %v", err)
+		logs = append(logs, errorMsg)
+		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
 	}
 
-	return CommandResult{
-		Output: map[string]interface{}{
-			"virtual_machines": vms,
-			"total_count":      len(vms),
-			"timestamp":        time.Now().UTC().Format(time.RFC3339),
-			"source":           "database_after_sync",
-			"sync_successful":  true,
-		},
-		Error:  "",
-		Status: "success",
+	logs = append(logs, fmt.Sprintf("Successfully retrieved %d VMs from database after sync", len(vms)))
+
+	result := map[string]interface{}{
+		"virtual_machines": vms,
+		"total_count":      len(vms),
+		"timestamp":        time.Now().UTC().Format(time.RFC3339),
+		"source":           "database_after_sync",
+		"sync_successful":  true,
+		"method":           "full_sync_and_retrieve",
 	}
+
+	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
 }
 
 // isHyperVAvailable checks if Hyper-V is available on the system
