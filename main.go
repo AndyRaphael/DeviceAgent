@@ -188,8 +188,8 @@ func runCommand(jwtToken, cmdID, command, parameters string) {
 	// Update last_seen whenever any command is executed
 	updateLastSeen(jwtToken)
 
-	// Execute the command using the new command system
-	result := ExecuteCommand(command, parameters)
+	// Execute the command using the new command system WITH JWT token
+	result := ExecuteCommand(command, parameters, jwtToken) // <-- Add jwtToken parameter
 
 	var finalResult string
 	if result.Status == "success" {

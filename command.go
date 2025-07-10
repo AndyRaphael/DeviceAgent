@@ -22,7 +22,7 @@ type CommandResult struct {
 }
 
 // ExecuteCommand is the main dispatcher that calls specific command functions
-func ExecuteCommand(command string, parameters string) CommandResult {
+func ExecuteCommand(command string, parameters string, jwtToken string) CommandResult {
 	// Parse parameters as JSON if provided
 	var params map[string]interface{}
 	if parameters != "" {
@@ -64,6 +64,26 @@ func ExecuteCommand(command string, parameters string) CommandResult {
 		return rebootComputer(params)
 	case "shutdown":
 		return shutdownComputer(params)
+	case "hyperv_inventory":
+		return executeHyperVInventory()
+	case "hyperv_inventory_db":
+		return executeHyperVInventoryWithDB(jwtToken)
+	case "hyperv_get_vms":
+		return executeHyperVGetVMsFromDB(jwtToken)
+	case "hyperv_sync":
+		return executeHyperVSyncAndGet(jwtToken)
+	case "hyperv_screenshot":
+		return executeHyperVScreenshot(params)
+	case "hyperv_start":
+		return executeHyperVStart(params)
+	case "hyperv_pause":
+		return executeHyperVPause(params)
+	case "hyperv_reset":
+		return executeHyperVReset(params)
+	case "hyperv_turnoff":
+		return executeHyperVTurnOff(params)
+	case "hyperv_shutdown":
+		return executeHyperVShutdown(params)
 	case "help":
 		return getAvailableCommands()
 	default:
@@ -1027,6 +1047,67 @@ func getAvailableCommands() CommandResult {
 			"parameters":  "delay (string, optional) - seconds to wait before shutdown (default: 30)",
 			"example":     `{"command": "shutdown"} or {"command": "shutdown", "parameters": "{\"delay\": \"120\"}"}`,
 		},
+		{
+			"command":     "hyperv_inventory",
+			"description": "Get inventory of all Hyper-V virtual machines (live data only)",
+			"parameters":  "None",
+			"example":     `{"command": "hyperv_inventory"}`,
+		},
+		{
+			"command":     "hyperv_inventory_db",
+			"description": "Get inventory of all Hyper-V virtual machines and update database",
+			"parameters":  "None",
+			"example":     `{"command": "hyperv_inventory_db"}`,
+		},
+		{
+			"command":     "hyperv_get_vms",
+			"description": "Get VMs from database (fast query, no PowerShell)",
+			"parameters":  "None",
+			"example":     `{"command": "hyperv_get_vms"}`,
+		},
+		{
+			"command":     "hyperv_sync",
+			"description": "Sync with PowerShell and return updated database data",
+			"parameters":  "None",
+			"example":     `{"command": "hyperv_sync"}`,
+		},
+		{
+			"command":     "hyperv_screenshot",
+			"description": "Capture screenshot of a VM console (VM must be running)",
+			"parameters":  "vm_id (string) - VM GUID",
+			"example":     `{"command": "hyperv_screenshot", "parameters": "{\"vm_id\": \"12345678-1234-1234-1234-123456789abc\"}"}`,
+		},
+		{
+			"command":     "hyperv_start",
+			"description": "Start a virtual machine",
+			"parameters":  "vm_id (string) - VM GUID",
+			"example":     `{"command": "hyperv_start", "parameters": "{\"vm_id\": \"12345678-1234-1234-1234-123456789abc\"}"}`,
+		},
+		{
+			"command":     "hyperv_pause",
+			"description": "Pause/suspend a virtual machine",
+			"parameters":  "vm_id (string) - VM GUID",
+			"example":     `{"command": "hyperv_pause", "parameters": "{\"vm_id\": \"12345678-1234-1234-1234-123456789abc\"}"}`,
+		},
+		{
+			"command":     "hyperv_reset",
+			"description": "Reset a virtual machine",
+			"parameters":  "vm_id (string) - VM GUID",
+			"example":     `{"command": "hyperv_reset", "parameters": "{\"vm_id\": \"12345678-1234-1234-1234-123456789abc\"}"}`,
+		},
+		{
+			"command":     "hyperv_turnoff",
+			"description": "Force turn off a virtual machine",
+			"parameters":  "vm_id (string) - VM GUID",
+			"example":     `{"command": "hyperv_turnoff", "parameters": "{\"vm_id\": \"12345678-1234-1234-1234-123456789abc\"}"}`,
+		},
+		{
+			"command":     "hyperv_shutdown",
+			"description": "Gracefully shutdown a virtual machine",
+			"parameters":  "vm_id (string) - VM GUID",
+			"example":     `{"command": "hyperv_shutdown", "parameters": "{\"vm_id\": \"12345678-1234-1234-1234-123456789abc\"}"}`,
+		},
+
 		{
 			"command":     "help",
 			"description": "Get list of available commands",
