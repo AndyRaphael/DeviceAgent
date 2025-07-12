@@ -13,39 +13,33 @@ import (
 
 // HyperVVMRecord represents a VM record in the database
 type HyperVVMRecord struct {
-	ID               string    `json:"id,omitempty"`
-	VMID             string    `json:"vm_id"`
-	VMName           string    `json:"vm_name"`
-	DeviceID         string    `json:"device_id"`
-	State            string    `json:"state"`
-	Status           string    `json:"status"`
-	Health           string    `json:"health"`
-	InstallationDate *string   `json:"installation_date,omitempty"`
-	StartTime        *string   `json:"start_time,omitempty"`
-	UptimeSeconds    *int      `json:"uptime_seconds,omitempty"`
-	CPUCores         *int      `json:"cpu_cores,omitempty"`
-	MemoryMB         *int64    `json:"memory_mb,omitempty"`
-	Generation       *int      `json:"generation,omitempty"`
-	Version          *string   `json:"version,omitempty"`
-	FirstSeen        time.Time `json:"first_seen"`
-	LastSeen         time.Time `json:"last_seen"`
-	LastUpdated      time.Time `json:"last_updated"`
-	IsDeleted        bool      `json:"is_deleted"`
+	ID          string    `json:"id,omitempty"`
+	VMID        string    `json:"vm_id"`
+	VMName      string    `json:"vm_name"`
+	DeviceID    string    `json:"device_id"`
+	State       string    `json:"state"`
+	Status      string    `json:"status"`
+	Health      string    `json:"health"`
+	Uptime      string    `json:"uptime"`
+	Generation  *int      `json:"generation,omitempty"`
+	Version     *string   `json:"version,omitempty"`
+	FirstSeen   time.Time `json:"first_seen"`
+	LastSeen    time.Time `json:"last_seen"`
+	LastUpdated time.Time `json:"last_updated"`
+	IsDeleted   bool      `json:"is_deleted"`
 }
 
 // SAFE REPLACEMENT for updateVMDatabase function in hyperv_database.go
 
-// updateVMDatabase updates the VM database with current inventory - ENHANCED LOGGING
+// Enhanced updateVMDatabase function to properly map all VM properties
 func updateVMDatabase(jwtToken, deviceID string, vms []HyperVVM) error {
-	log.Printf("Starting VM database update for device %s with %d VMs", deviceID, len(vms))
+	log.Printf("Updating VM database for device %s with %d VMs (enhanced)", deviceID, len(vms))
 
-	// Convert VMs to database records
+	// Convert VMs to database records with enhanced mapping
 	var vmRecords []HyperVVMRecord
 	currentTime := time.Now().UTC()
 
-	log.Printf("Converting %d VMs to database records", len(vms))
-
-	for i, vm := range vms {
+	for _, vm := range vms {
 		record := HyperVVMRecord{
 			VMID:     vm.ID,
 			VMName:   vm.Name,
@@ -56,163 +50,87 @@ func updateVMDatabase(jwtToken, deviceID string, vms []HyperVVM) error {
 			LastSeen: currentTime,
 		}
 
-		// Parse installation date
-		if vm.InstallationDate != "" {
-			record.InstallationDate = &vm.InstallationDate
+		// Set generation
+		if vm.Generation != nil && *vm.Generation > 0 {
+			record.Generation = vm.Generation
+			log.Printf("VM %s: generation set to %d", vm.Name, *vm.Generation)
+		} else {
+			log.Printf("VM %s: generation not available", vm.Name)
 		}
 
-		// Parse start time and calculate uptime
-		if vm.StartTime != "" {
-			record.StartTime = &vm.StartTime
-
-			// Calculate uptime in seconds if we have start time
-			if startTime, err := time.Parse(time.RFC3339, vm.StartTime); err == nil {
-				uptimeSeconds := int(currentTime.Sub(startTime).Seconds())
-				record.UptimeSeconds = &uptimeSeconds
-			}
+		// Set version
+		if vm.Version != nil && *vm.Version != "" {
+			record.Version = vm.Version
+			log.Printf("VM %s: version set to %s", vm.Name, *vm.Version)
+		} else {
+			log.Printf("VM %s: version not available", vm.Name)
 		}
 
 		vmRecords = append(vmRecords, record)
-		log.Printf("Processed VM %d/%d: %s (%s)", i+1, len(vms), vm.Name, vm.State)
 	}
 
-	log.Printf("Starting upsert operations for %d VM records", len(vmRecords))
-
-	// Process each VM record
+	// Process each VM record with enhanced error handling
 	successCount := 0
 	errorCount := 0
-	for i, record := range vmRecords {
+	for _, record := range vmRecords {
 		if err := upsertVMRecord(jwtToken, record); err != nil {
-			log.Printf("Failed to upsert VM %s (%d/%d): %v", record.VMID, i+1, len(vmRecords), err)
+			log.Printf("Failed to upsert VM %s (%s): %v", record.VMName, record.VMID, err)
 			errorCount++
-			// Continue with other VMs rather than failing completely
 		} else {
 			successCount++
 		}
 	}
 
-	log.Printf("Upsert operations completed: %d successful, %d failed", successCount, errorCount)
+	log.Printf("VM upsert results: %d successful, %d failed", successCount, errorCount)
 
 	// Mark VMs not in current inventory as potentially deleted
-	log.Printf("Marking missing VMs as stale for device %s", deviceID)
 	if err := markMissingVMsAsStale(jwtToken, deviceID, vmRecords); err != nil {
 		log.Printf("Failed to mark missing VMs as stale: %v", err)
-		// Don't fail the entire operation for this
-	} else {
-		log.Printf("Successfully marked missing VMs as stale")
 	}
 
-	if errorCount > 0 {
-		return fmt.Errorf("VM database update completed with %d errors out of %d operations", errorCount, len(vmRecords))
+	log.Printf("Enhanced VM database update completed for device %s", deviceID)
+
+	// Return error only if all operations failed
+	if errorCount > 0 && successCount == 0 {
+		return fmt.Errorf("all VM database operations failed")
 	}
 
-	log.Printf("VM database update completed successfully for device %s", deviceID)
 	return nil
 }
 
-// SAFE REPLACEMENT for upsertVMRecord function in hyperv_database.go
-
-// upsertVMRecord inserts or updates a VM record - ENHANCED LOGGING
+// upsertVMRecord inserts or updates a VM record
 func upsertVMRecord(jwtToken string, record HyperVVMRecord) error {
-	log.Printf("Upserting VM record: %s (%s)", record.VMName, record.VMID)
-
 	// Check if VM already exists
 	existingVM, err := getVMByIDAndDevice(jwtToken, record.VMID, record.DeviceID)
 	if err != nil {
-		log.Printf("Error checking existing VM %s: %v", record.VMID, err)
-		// Continue with insert attempt
+		log.Printf("Error checking existing VM: %v", err)
 	}
 
 	if existingVM != nil {
-		log.Printf("VM %s exists in database, updating record (ID: %s)", record.VMName, existingVM.ID)
 		// Update existing record
 		return updateVMRecord(jwtToken, existingVM.ID, record)
 	} else {
-		log.Printf("VM %s is new, inserting record", record.VMName)
 		// Insert new record
 		return insertVMRecord(jwtToken, record)
 	}
 }
 
-// SAFE REPLACEMENT for insertVMRecord function in hyperv_database.go
-
-// insertVMRecord inserts a new VM record - ENHANCED LOGGING
-func insertVMRecord(jwtToken string, record HyperVVMRecord) error {
-	log.Printf("Inserting new VM record: %s (%s)", record.VMName, record.VMID)
-
-	// Set timestamps for new record
-	now := time.Now().UTC()
-	record.FirstSeen = now
-	record.LastSeen = now
-	record.LastUpdated = now
-	record.IsDeleted = false
-
-	data, err := json.Marshal(record)
-	if err != nil {
-		log.Printf("Failed to marshal VM record for %s: %v", record.VMName, err)
-		return err
-	}
-
-	url := fmt.Sprintf("%s/rest/v1/hyperv_vms", supabaseURL)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
-	if err != nil {
-		log.Printf("Failed to create HTTP request for VM %s: %v", record.VMName, err)
-		return err
-	}
-
-	req.Header.Set("apikey", supabaseAPIKey)
-	req.Header.Set("Authorization", "Bearer "+jwtToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "return=minimal")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Printf("HTTP request failed for VM %s: %v", record.VMName, err)
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("Failed to insert VM %s: HTTP %d, Body: %s", record.VMName, resp.StatusCode, string(body))
-		return fmt.Errorf("failed to insert VM: HTTP %d, Body: %s", resp.StatusCode, string(body))
-	}
-
-	log.Printf("Successfully inserted new VM record: %s (%s)", record.VMName, record.VMID)
-	return nil
-}
-
-// SAFE REPLACEMENT for updateVMRecord function in hyperv_database.go
-
-// updateVMRecord updates an existing VM record - ENHANCED LOGGING
+// Enhanced updateVMRecord to handle all the new fields properly
 func updateVMRecord(jwtToken, recordID string, record HyperVVMRecord) error {
-	log.Printf("Updating existing VM record: %s (%s) with ID %s", record.VMName, record.VMID, recordID)
-
-	// Prepare update data (exclude fields that shouldn't be updated)
+	// Prepare update data with all enhanced fields
 	updateData := map[string]interface{}{
-		"vm_name":    record.VMName,
-		"state":      record.State,
-		"status":     record.Status,
-		"health":     record.Health,
-		"last_seen":  record.LastSeen.Format(time.RFC3339),
-		"is_deleted": false, // Mark as active again if it was deleted
+		"vm_name":      record.VMName,
+		"state":        record.State,
+		"status":       record.Status,
+		"health":       record.Health,
+		"last_seen":    record.LastSeen.Format(time.RFC3339),
+		"last_updated": time.Now().UTC().Format(time.RFC3339),
+		"is_deleted":   false, // Mark as active again if it was deleted
 	}
 
 	// Include optional fields if they have values
-	if record.InstallationDate != nil {
-		updateData["installation_date"] = *record.InstallationDate
-	}
-	if record.StartTime != nil {
-		updateData["start_time"] = *record.StartTime
-	}
-	if record.UptimeSeconds != nil {
-		updateData["uptime_seconds"] = *record.UptimeSeconds
-	}
-	if record.CPUCores != nil {
-		updateData["cpu_cores"] = *record.CPUCores
-	}
-	if record.MemoryMB != nil {
-		updateData["memory_mb"] = *record.MemoryMB
+	if record.Uptime != "" {
+		updateData["uptime"] = record.Uptime
 	}
 	if record.Generation != nil {
 		updateData["generation"] = *record.Generation
@@ -223,14 +141,12 @@ func updateVMRecord(jwtToken, recordID string, record HyperVVMRecord) error {
 
 	data, err := json.Marshal(updateData)
 	if err != nil {
-		log.Printf("Failed to marshal update data for VM %s: %v", record.VMName, err)
 		return err
 	}
 
 	url := fmt.Sprintf("%s/rest/v1/hyperv_vms?id=eq.%s", supabaseURL, recordID)
 	req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(data))
 	if err != nil {
-		log.Printf("Failed to create HTTP request for VM update %s: %v", record.VMName, err)
 		return err
 	}
 
@@ -240,20 +156,62 @@ func updateVMRecord(jwtToken, recordID string, record HyperVVMRecord) error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("HTTP request failed for VM update %s: %v", record.VMName, err)
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
-		log.Printf("Failed to update VM %s: HTTP %d, Body: %s", record.VMName, resp.StatusCode, string(body))
 		return fmt.Errorf("failed to update VM: HTTP %d, Body: %s", resp.StatusCode, string(body))
 	}
 
-	log.Printf("Successfully updated VM record: %s (%s)", record.VMName, record.VMID)
+	log.Printf("Enhanced update completed for VM: %s (%s)", record.VMName, record.VMID)
 	return nil
 }
+
+// SAFE REPLACEMENT for insertVMRecord function in hyperv_database.go
+
+// Enhanced insertVMRecord for new VM records
+func insertVMRecord(jwtToken string, record HyperVVMRecord) error {
+	// Set timestamps for new record
+	now := time.Now().UTC()
+	record.FirstSeen = now
+	record.LastSeen = now
+	record.LastUpdated = now
+	record.IsDeleted = false
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/rest/v1/hyperv_vms", supabaseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("apikey", supabaseAPIKey)
+	req.Header.Set("Authorization", "Bearer "+jwtToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to insert VM: HTTP %d, Body: %s", resp.StatusCode, string(body))
+	}
+
+	log.Printf("Enhanced insert completed for new VM: %s (%s)", record.VMName, record.VMID)
+	return nil
+}
+
+// SAFE REPLACEMENT for updateVMRecord function in hyperv_database.go
 
 // getVMByIDAndDevice retrieves a VM by its ID and device
 func getVMByIDAndDevice(jwtToken, vmID, deviceID string) (*HyperVVMRecord, error) {

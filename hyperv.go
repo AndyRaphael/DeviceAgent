@@ -12,96 +12,102 @@ import (
 
 // HyperVVM represents a Hyper-V virtual machine
 type HyperVVM struct {
-	ID               string `json:"id"`
-	Name             string `json:"name"`
-	State            string `json:"state"`
-	Status           string `json:"status"`
-	Health           string `json:"health"`
-	InstallationDate string `json:"installation_date"`
-	StartTime        string `json:"start_time,omitempty"`
-	Uptime           string `json:"uptime,omitempty"`
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	State      string  `json:"state"`
+	Status     string  `json:"status"`
+	Health     string  `json:"health"`
+	Uptime     string  `json:"uptime"`
+	Generation *int    `json:"generation,omitempty"`
+	Version    *string `json:"version,omitempty"`
 }
 
-// executeHyperVInventory gets an inventory of all virtual machines with enhanced logging
+// executeHyperVInventory gets an inventory of all virtual machines and updates the database
 func executeHyperVInventory() CommandResult {
-	var logs []string
-	logs = append(logs, "Starting Hyper-V inventory collection")
-
 	if runtime.GOOS != "windows" {
-		errorMsg := "Hyper-V commands are only supported on Windows"
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+		return CommandResult{
+			Output: map[string]string{"error": "Hyper-V commands are only supported on Windows"},
+			Error:  "Hyper-V commands are only supported on Windows",
+			Status: "error",
+		}
 	}
 
 	// Check if Hyper-V is available
-	logs = append(logs, "Checking Hyper-V availability")
 	if !isHyperVAvailable() {
-		errorMsg := "Hyper-V is not available or enabled on this system"
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+		return CommandResult{
+			Output: map[string]string{"error": "Hyper-V is not available or enabled on this system"},
+			Error:  "Hyper-V is not available or enabled on this system",
+			Status: "error",
+		}
 	}
-	logs = append(logs, "Hyper-V is available and accessible")
 
-	// Get VMs from PowerShell (existing logic)
-	logs = append(logs, "Retrieving VM data from PowerShell")
+	// Get VMs from PowerShell with enhanced data collection
 	vms, err := getVMsFromPowerShell()
 	if err != nil {
-		errorMsg := fmt.Sprintf("Failed to get VM inventory: %v", err)
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+		return CommandResult{
+			Output: map[string]string{"error": fmt.Sprintf("Failed to get VM inventory: %v", err)},
+			Error:  fmt.Sprintf("Failed to get VM inventory: %v", err),
+			Status: "error",
+		}
 	}
 
-	logs = append(logs, fmt.Sprintf("Successfully retrieved %d virtual machines", len(vms)))
-
-	// Return result with both live data and database update status
+	// Return result with enhanced data
 	result := map[string]interface{}{
 		"virtual_machines": vms,
 		"total_count":      len(vms),
 		"timestamp":        time.Now().UTC().Format(time.RFC3339),
-		"source":           "live_powershell",
-		"method":           "hyperv_powershell",
+		"source":           "live_powershell_enhanced",
+		"data_fields":      []string{"id", "name", "state", "status", "health", "installation_date", "start_time", "uptime_seconds", "cpu_cores", "memory_mb", "generation", "version"},
 	}
 
-	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
+	return CommandResult{
+		Output: result,
+		Error:  "",
+		Status: "success",
+	}
 }
 
-// getVMsFromPowerShell extracts the PowerShell logic into a separate function
+// getVMsFromPowerShell extracts VM information with enhanced data collection
 func getVMsFromPowerShell() ([]HyperVVM, error) {
-	// PowerShell script to get VM inventory
+	// Enhanced PowerShell script to collect all VM properties
 	script := `
-	Get-VM | ForEach-Object {
+		Get-VM | ForEach-Object {
 		$vm = $_
-		$startTime = ""
 		$uptime = ""
 		
-		# Get start time and calculate uptime for running VMs
-		if ($vm.State -eq "Running") {
-			try {
-				# Try to get start time from VM worker process
-				$processes = Get-WmiObject -Class Win32_Process -Filter "Name='vmwp.exe'" | Where-Object {
-					$_.CommandLine -like "*$($vm.Id)*"
-				}
-				if ($processes) {
-					$startTime = $processes[0].CreationDate
-					if ($startTime) {
-						$start = [Management.ManagementDateTimeConverter]::ToDateTime($startTime)
-						$uptime = (Get-Date) - $start
-						$startTime = $start.ToString("yyyy-MM-ddTHH:mm:ssZ")
-						$uptime = "$($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m"
-					}
-				}
-			} catch {
-				# If we can't get exact start time, use a placeholder
-				$startTime = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssZ")
-			}
+		if ($vm.State -eq "Running" -and $vm.Uptime) {
+			$uptime = "$($vm.Uptime.Days)d $($vm.Uptime.Hours)h $($vm.Uptime.Minutes)m"
 		}
 		
-		# Get creation date
-		$creationDate = ""
+		$generation = $null
 		try {
-			$creationDate = $vm.CreationTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
+			if ($vm.Generation) {
+				$generation = $vm.Generation
+			}
 		} catch {
-			$creationDate = ""
+			$generation = $null
+		}
+		
+		$version = ""
+		try {
+			if ($vm.Version) {
+				$version = $vm.Version.ToString()
+			}
+		} catch {
+			$version = ""
+		}
+		
+		$healthStatus = ""
+		try {
+			if ($vm.OperationalStatus) {
+				if ($vm.OperationalStatus -is [array]) {
+					$healthStatus = ($vm.OperationalStatus | ForEach-Object { $_.ToString() }) -join ", "
+				} else {
+					$healthStatus = $vm.OperationalStatus.ToString()
+				}
+			}
+		} catch {
+			$healthStatus = "Unknown"
 		}
 		
 		[PSCustomObject]@{
@@ -109,10 +115,10 @@ func getVMsFromPowerShell() ([]HyperVVM, error) {
 			Name = $vm.Name
 			State = $vm.State.ToString()
 			Status = $vm.Status.ToString()
-			Health = $vm.OperationalStatus.ToString()
-			InstallationDate = $creationDate
-			StartTime = $startTime
+			Health = $healthStatus
 			Uptime = $uptime
+			Generation = if ($generation -ne $null) { [int]$generation } else { $null }
+			Version = $version
 		}
 	} | ConvertTo-Json -Depth 3
 	`
@@ -138,64 +144,61 @@ func getVMsFromPowerShell() ([]HyperVVM, error) {
 	return vms, nil
 }
 
-// executeHyperVInventoryWithDB gets inventory and updates database with enhanced logging
+// executeHyperVInventoryWithDB gets enhanced inventory and updates database
 func executeHyperVInventoryWithDB(jwtToken string) CommandResult {
-	var logs []string
-	logs = append(logs, "Starting Hyper-V inventory with database update")
-
 	if runtime.GOOS != "windows" {
-		errorMsg := "Hyper-V commands are only supported on Windows"
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+		return CommandResult{
+			Output: map[string]string{"error": "Hyper-V commands are only supported on Windows"},
+			Error:  "Hyper-V commands are only supported on Windows",
+			Status: "error",
+		}
 	}
 
 	// Check if Hyper-V is available
-	logs = append(logs, "Checking Hyper-V availability")
 	if !isHyperVAvailable() {
-		errorMsg := "Hyper-V is not available or enabled on this system"
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+		return CommandResult{
+			Output: map[string]string{"error": "Hyper-V is not available or enabled on this system"},
+			Error:  "Hyper-V is not available or enabled on this system",
+			Status: "error",
+		}
 	}
-	logs = append(logs, "Hyper-V is available and accessible")
 
-	// Get VMs from PowerShell
-	logs = append(logs, "Retrieving VM data from PowerShell")
+	// Get VMs from PowerShell with enhanced data collection
 	vms, err := getVMsFromPowerShell()
 	if err != nil {
-		errorMsg := fmt.Sprintf("Failed to get VM inventory: %v", err)
-		logs = append(logs, errorMsg)
-		return NewErrorResultWithDetails(errorMsg, strings.Join(logs, "\n"))
+		return CommandResult{
+			Output: map[string]string{"error": fmt.Sprintf("Failed to get VM inventory: %v", err)},
+			Error:  fmt.Sprintf("Failed to get VM inventory: %v", err),
+			Status: "error",
+		}
 	}
 
-	logs = append(logs, fmt.Sprintf("Successfully retrieved %d virtual machines from PowerShell", len(vms)))
-
-	// Update database with current inventory
+	// Update database with enhanced inventory
 	dbUpdateError := ""
-	logs = append(logs, "Updating database with VM inventory")
 	if err := updateVMDatabase(jwtToken, deviceID, vms); err != nil {
 		dbUpdateError = fmt.Sprintf("Database update failed: %v", err)
-		logs = append(logs, dbUpdateError)
 		log.Printf("Database update error: %v", err)
-	} else {
-		logs = append(logs, "Database updated successfully")
 	}
 
-	// Return result with both live data and database update status
+	// Return result with enhanced data and statistics
 	result := map[string]interface{}{
 		"virtual_machines": vms,
 		"total_count":      len(vms),
 		"timestamp":        time.Now().UTC().Format(time.RFC3339),
-		"source":           "live_powershell_with_db_update",
+		"source":           "live_powershell_enhanced_with_db_update",
 		"database_updated": dbUpdateError == "",
-		"method":           "hyperv_powershell_with_db",
+		"data_fields":      []string{"id", "name", "state", "status", "health", "uptime", "generation", "version"},
 	}
 
 	if dbUpdateError != "" {
 		result["database_error"] = dbUpdateError
-		logs = append(logs, "Warning: Database update failed but VM data was retrieved successfully")
 	}
 
-	return NewSuccessResultWithLogs(result, strings.Join(logs, "\n"))
+	return CommandResult{
+		Output: result,
+		Error:  "",
+		Status: "success",
+	}
 }
 
 // SECURE REPLACEMENTS for Hyper-V operation functions in hyperv.go
