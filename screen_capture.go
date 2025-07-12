@@ -336,79 +336,61 @@ func runScreenCaptureHelper() {
 
 // executeScreenCaptureHelper is called when running in helper mode with optimized capture
 func executeScreenCaptureHelper(sessionID, outputPath string, wtsMode bool) error {
-
 	fmt.Printf("Helper started - Session: %s, WTS: %t\n", sessionID, wtsMode)
 
-	// Get virtual screen dimensions
-	virtualLeft, _, _ := procGetSystemMetrics.Call(SM_XVIRTUALSCREEN)
-	virtualTop, _, _ := procGetSystemMetrics.Call(SM_YVIRTUALSCREEN)
-	virtualWidth, _, _ := procGetSystemMetrics.Call(SM_CXVIRTUALSCREEN)
-	virtualHeight, _, _ := procGetSystemMetrics.Call(SM_CYVIRTUALSCREEN)
+	// Get system DPI to calculate scaling factor
+	systemDPI, _, _ := procGetDpiForSystem.Call()
+	if systemDPI == 0 {
+		systemDPI = 96 // Default DPI
+	}
 
-	// Enhanced desktop DC access with RDP-specific handling
+	// Calculate scaling factor (96 DPI = 100%, 120 DPI = 125%, 144 DPI = 150%, etc.)
+	scalingFactor := float64(systemDPI) / 96.0
+
+	// Get logical screen dimensions
+	logicalLeft, _, _ := procGetSystemMetrics.Call(SM_XVIRTUALSCREEN)
+	logicalTop, _, _ := procGetSystemMetrics.Call(SM_YVIRTUALSCREEN)
+	logicalWidth, _, _ := procGetSystemMetrics.Call(SM_CXVIRTUALSCREEN)
+	logicalHeight, _, _ := procGetSystemMetrics.Call(SM_CYVIRTUALSCREEN)
+
+	// Calculate physical dimensions by applying scaling factor
+	virtualLeft := int(float64(logicalLeft) * scalingFactor)
+	virtualTop := int(float64(logicalTop) * scalingFactor)
+	virtualWidth := int(float64(logicalWidth) * scalingFactor)
+	virtualHeight := int(float64(logicalHeight) * scalingFactor)
+
+	// Debug info - write to a debug file
+	debugInfo := fmt.Sprintf("SYSTEM DPI: %d\n", systemDPI)
+	debugInfo += fmt.Sprintf("SCALING FACTOR: %.2f (%.0f%%)\n", scalingFactor, scalingFactor*100)
+	debugInfo += fmt.Sprintf("LOGICAL DIMENSIONS: Left=%d, Top=%d, Width=%d, Height=%d\n",
+		logicalLeft, logicalTop, logicalWidth, logicalHeight)
+	debugInfo += fmt.Sprintf("CALCULATED PHYSICAL DIMENSIONS: Left=%d, Top=%d, Width=%d, Height=%d\n",
+		virtualLeft, virtualTop, virtualWidth, virtualHeight)
+
+	// Get desktop DC - try display device context for physical pixels
 	var hDesktopDC uintptr
 	var dcMethod string
-	var sourceWindow uintptr
 
-	// For RDP sessions (WTS mode), skip window-based DCs and go straight to screen/display DCs
-	if wtsMode {
-		// Method 1: Try CreateDC("DISPLAY") first for RDP
+	// For console, try to bypass scaling by using display device
+	if !wtsMode {
+		// Try CreateDC for primary display to get physical pixels
 		displayName, _ := windows.UTF16PtrFromString("DISPLAY")
 		hDesktopDC, _, _ = procCreateDC.Call(
 			uintptr(unsafe.Pointer(displayName)), 0, 0, 0,
 		)
 		if hDesktopDC != 0 {
-			dcMethod = "CreateDC DISPLAY"
+			dcMethod = "CreateDC DISPLAY (physical)"
 		}
+	}
 
-		// Method 2: Fallback to GetDC(0) for RDP if CreateDC fails
-		if hDesktopDC == 0 {
-			hDesktopDC, _, _ = procGetDC.Call(0)
-			if hDesktopDC != 0 {
-				dcMethod = "Screen DC (RDP fallback)"
-			}
-		}
-	} else {
-		// For console sessions, try window-based methods first
-
-		// Method 1: Try to get DC from foreground window first
-		hForegroundWnd, _, _ := procGetForegroundWindow.Call()
-		if hForegroundWnd != 0 {
-			hDesktopDC, _, _ = procGetDC.Call(hForegroundWnd)
-			if hDesktopDC != 0 {
-				dcMethod = "Foreground Window DC"
-				sourceWindow = hForegroundWnd
+	// Fallback to regular screen DC
+	if hDesktopDC == 0 {
+		hDesktopDC, _, _ = procGetDC.Call(0)
+		if hDesktopDC != 0 {
+			if wtsMode {
+				dcMethod = "Screen DC (RDP)"
 			} else {
-				if hDesktopDC != 0 {
-					procReleaseDC.Call(hForegroundWnd, hDesktopDC)
-					hDesktopDC = 0
-				}
-			}
-		}
-
-		// Method 2: Try to get DC from desktop window
-		if hDesktopDC == 0 {
-			hDesktopWnd, _, _ := procGetDesktopWindow.Call()
-			if hDesktopWnd != 0 {
-				hDesktopDC, _, _ = procGetDC.Call(hDesktopWnd)
-				if hDesktopDC != 0 {
-					dcMethod = "Desktop Window DC"
-					sourceWindow = hDesktopWnd
-				} else {
-					if hDesktopDC != 0 {
-						procReleaseDC.Call(hDesktopWnd, hDesktopDC)
-						hDesktopDC = 0
-					}
-				}
-			}
-		}
-
-		// Method 3: Fallback to screen DC for console
-		if hDesktopDC == 0 {
-			hDesktopDC, _, _ = procGetDC.Call(0)
-			if hDesktopDC != 0 {
-				dcMethod = "Screen DC (console fallback)"
-				sourceWindow = 0
+				dcMethod = "Screen DC (console scaled)"
 			}
 		}
 	}
@@ -417,89 +399,102 @@ func executeScreenCaptureHelper(sessionID, outputPath string, wtsMode bool) erro
 		return fmt.Errorf("failed to get desktop DC")
 	}
 
-	// Set up proper cleanup based on method used
+	debugInfo += fmt.Sprintf("DC METHOD: %s\n", dcMethod)
+
+	// Set up proper cleanup
 	defer func() {
-		if dcMethod == "CreateDC DISPLAY" {
+		if strings.Contains(dcMethod, "CreateDC") {
 			procDeleteDC.Call(hDesktopDC)
-		} else if dcMethod == "Foreground Window DC" && sourceWindow != 0 {
-			procReleaseDC.Call(sourceWindow, hDesktopDC)
-		} else if dcMethod == "Desktop Window DC" && sourceWindow != 0 {
-			procReleaseDC.Call(sourceWindow, hDesktopDC)
 		} else {
 			procReleaseDC.Call(0, hDesktopDC)
 		}
 	}()
 
-	// Test memory DC creation
+	// Create memory DC
 	hMemoryDC, _, err := procCreateCompatibleDC.Call(hDesktopDC)
 	if hMemoryDC == 0 {
 		return fmt.Errorf("failed to create compatible DC: %v", err)
 	}
 	defer procDeleteDC.Call(hMemoryDC)
 
-	// Calculate target dimensions based on monitor setup
-	var targetWidth int
-	if virtualWidth > virtualHeight*2 {
-		// Multi-monitor setup (wide aspect ratio) - use higher resolution
-		targetWidth = 1200
+	// Calculate target dimensions
+	var targetWidth, targetHeight int
+
+	if wtsMode {
+		// For RDP, use scaling to reduce file size
+		if virtualWidth > virtualHeight*2 {
+			targetWidth = 1200 // Multi-monitor setup
+		} else {
+			targetWidth = 800 // Single monitor
+		}
+		scaleFactorX := float64(virtualWidth) / float64(targetWidth)
+		targetHeight = int(float64(virtualHeight) / scaleFactorX)
 	} else {
-		// Single monitor or stacked setup - use standard resolution
-		targetWidth = 800
+		// For console, use calculated physical dimensions
+		targetWidth = virtualWidth
+		targetHeight = virtualHeight
 	}
 
-	scaleFactorX := float64(virtualWidth) / float64(targetWidth)
-	targetHeight := int(float64(virtualHeight) / scaleFactorX)
+	debugInfo += fmt.Sprintf("TARGET DIMENSIONS: Width=%d, Height=%d\n", targetWidth, targetHeight)
 
+	// Create bitmap
 	hBitmap, _, err := procCreateCompatibleBitmap.Call(hDesktopDC, uintptr(targetWidth), uintptr(targetHeight))
 	if hBitmap == 0 {
 		return fmt.Errorf("failed to create compatible bitmap: %v", err)
 	}
 	defer procDeleteObject.Call(hBitmap)
 
+	// Select bitmap into memory DC
 	hOldBitmap, _, err := procSelectObject.Call(hMemoryDC, hBitmap)
 	if hOldBitmap == 0 {
 		return fmt.Errorf("failed to select bitmap: %v", err)
 	}
 	defer procSelectObject.Call(hMemoryDC, hOldBitmap)
 
-	// Perform StretchBlt to scale full screen to target size
-	result, _, err := procStretchBlt.Call(
-		hMemoryDC, // Destination DC
-		0, 0,      // Destination x,y
-		uintptr(targetWidth), uintptr(targetHeight), // Destination width,height
-		hDesktopDC,                                // Source DC
-		uintptr(virtualLeft), uintptr(virtualTop), // Source x,y
-		uintptr(virtualWidth), uintptr(virtualHeight), // Source width,height
-		SRCCOPY, // Copy mode
-	)
+	// Perform screen capture
+	var result uintptr
+	if wtsMode && (targetWidth != int(virtualWidth) || targetHeight != int(virtualHeight)) {
+		// For RDP with scaling, use StretchBlt
+		result, _, err = procStretchBlt.Call(
+			hMemoryDC, 0, 0, uintptr(targetWidth), uintptr(targetHeight),
+			hDesktopDC, uintptr(virtualLeft), uintptr(virtualTop),
+			uintptr(virtualWidth), uintptr(virtualHeight),
+			SRCCOPY,
+		)
+		debugInfo += fmt.Sprintf("CAPTURE METHOD: StretchBlt (scaled)\n")
+	} else {
+		// For console or non-scaled capture, use BitBlt
+		result, _, err = procBitBlt.Call(
+			hMemoryDC, 0, 0, uintptr(targetWidth), uintptr(targetHeight),
+			hDesktopDC, uintptr(virtualLeft), uintptr(virtualTop),
+			SRCCOPY,
+		)
+		debugInfo += fmt.Sprintf("CAPTURE METHOD: BitBlt (full size)\n")
+	}
 
 	if result == 0 {
-		return fmt.Errorf("failed to capture and scale screen: %v", err)
+		return fmt.Errorf("failed to capture screen: %v", err)
 	}
 
-	// Check if user wants high quality mode
-	highQuality := false
-	for _, arg := range os.Args {
-		if arg == "--high-quality" || arg == "--hq" {
-			highQuality = true
-			break
-		}
-	}
-
+	// Convert bitmap to image - use different methods for RDP vs console
 	var goImage image.Image
 	var convertErr error
 
-	if highQuality {
-		goImage, convertErr = convertUsingScanlines(hMemoryDC, targetWidth, targetHeight, logCleanFunc)
-	} else {
+	if wtsMode {
+		// RDP sessions - use existing working method with sampling
 		goImage, convertErr = convertHBitmapToImageFastRDP(hBitmap, targetWidth, targetHeight, hMemoryDC, logCleanFunc)
+		debugInfo += "CONVERSION METHOD: RDP (with sampling)\n"
+	} else {
+		// Console sessions - use GetDIBits method only (no sampling)
+		goImage, convertErr = convertUsingGetDIBitsEnhanced(hBitmap, targetWidth, targetHeight, logCleanFunc)
+		debugInfo += "CONVERSION METHOD: Console (GetDIBits only)\n"
 	}
 
 	if convertErr != nil {
 		return fmt.Errorf("failed to convert bitmap: %v", convertErr)
 	}
 
-	// Encode final image
+	// Encode as JPEG
 	var buf bytes.Buffer
 	err = jpeg.Encode(&buf, goImage, &jpeg.Options{Quality: 85})
 	if err != nil {
@@ -507,11 +502,17 @@ func executeScreenCaptureHelper(sessionID, outputPath string, wtsMode bool) erro
 	}
 	imageData := buf.Bytes()
 
+	debugInfo += fmt.Sprintf("FINAL IMAGE: %d bytes\n", len(imageData))
+
 	// Write output file
 	err = os.WriteFile(outputPath, imageData, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write output file: %v", err)
 	}
+
+	// Write debug file
+	debugPath := strings.Replace(outputPath, ".jpg", "_debug.txt", 1)
+	os.WriteFile(debugPath, []byte(debugInfo), 0644)
 
 	fmt.Printf("Screenshot completed - %d bytes\n", len(imageData))
 	return nil
