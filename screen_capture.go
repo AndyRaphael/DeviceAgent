@@ -10,7 +10,9 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -114,6 +116,24 @@ type ScreenInfo struct {
 	virtualHeight int
 	dpiInfo       string
 }
+type MONITORINFO struct {
+	Size    uint32
+	Monitor RECT
+	Work    RECT
+	Flags   uint32
+}
+
+type RECT struct {
+	Left   int32
+	Top    int32
+	Right  int32
+	Bottom int32
+}
+
+type POINT struct {
+	X int32
+	Y int32
+}
 
 var (
 	moduser32   = windows.NewLazySystemDLL("user32.dll")
@@ -143,6 +163,8 @@ var (
 	procSetThreadDesktop       = moduser32.NewProc("SetThreadDesktop")
 	procCloseDesktop           = moduser32.NewProc("CloseDesktop")
 	procStretchBlt             = modgdi32.NewProc("StretchBlt")
+	procMonitorFromPoint       = moduser32.NewProc("MonitorFromPoint")
+	procGetMonitorInfo         = moduser32.NewProc("GetMonitorInfoW")
 
 	// Session and process management
 	procWTSQueryUserToken       = modwtsapi32.NewProc("WTSQueryUserToken")
@@ -284,15 +306,15 @@ func handleScreenCaptureHelper() {
 	runScreenCaptureHelper()
 }
 
-// runScreenCaptureHelper runs the screen capture helper mode (restored functionality)
 func runScreenCaptureHelper() {
 	if len(os.Args) < 5 {
 		fmt.Println("ERROR: Insufficient arguments")
-		fmt.Println("Usage: deviceagent.exe capture-screen --session <sessionid> --output <filepath> [--wts-mode]")
+		fmt.Println("Usage: deviceagent.exe capture-screen --session <sessionid> --output <filepath> [--width <width>] [--height <height>] [--wts-mode]")
 		os.Exit(1)
 	}
 
 	var sessionID, outputPath string
+	var physicalWidth, physicalHeight int
 	var wtsMode bool
 
 	for i := 2; i < len(os.Args); i++ {
@@ -305,6 +327,16 @@ func runScreenCaptureHelper() {
 		case "--output":
 			if i+1 < len(os.Args) {
 				outputPath = os.Args[i+1]
+				i++
+			}
+		case "--width":
+			if i+1 < len(os.Args) {
+				physicalWidth, _ = strconv.Atoi(os.Args[i+1])
+				i++
+			}
+		case "--height":
+			if i+1 < len(os.Args) {
+				physicalHeight, _ = strconv.Atoi(os.Args[i+1])
 				i++
 			}
 		case "--wts-mode":
@@ -324,8 +356,8 @@ func runScreenCaptureHelper() {
 		os.Exit(1)
 	}
 
-	// Execute screen capture
-	result := executeScreenCaptureHelper(sessionID, outputPath, wtsMode)
+	// Execute screen capture with passed dimensions
+	result := executeScreenCaptureHelperWithDimensions(sessionID, outputPath, wtsMode, physicalWidth, physicalHeight)
 	if result != nil {
 		fmt.Printf("Error: %v\n", result)
 		os.Exit(1)
@@ -334,37 +366,53 @@ func runScreenCaptureHelper() {
 	fmt.Println("Screen capture completed successfully")
 }
 
-// executeScreenCaptureHelper is called when running in helper mode with optimized capture
-func executeScreenCaptureHelper(sessionID, outputPath string, wtsMode bool) error {
-	fmt.Printf("Helper started - Session: %s, WTS: %t\n", sessionID, wtsMode)
+// executeScreenCaptureHelperWithDimensions is called when running in helper mode with passed dimensions
+func executeScreenCaptureHelperWithDimensions(sessionID, outputPath string, wtsMode bool, passedWidth, passedHeight int) error {
+	fmt.Printf("Helper started - Session: %s, WTS: %t, Passed dimensions: %dx%d\n", sessionID, wtsMode, passedWidth, passedHeight)
+	log.Printf("HELPER_STARTED: SessionID=%s, WTSMode=%t, PassedDimensions=%dx%d", sessionID, wtsMode, passedWidth, passedHeight)
 
-	// Get system DPI to calculate scaling factor
-	systemDPI, _, _ := procGetDpiForSystem.Call()
-	if systemDPI == 0 {
-		systemDPI = 96 // Default DPI
+	// Use passed dimensions for console mode, fallback to detection for RDP
+	var virtualLeft, virtualTop, virtualWidth, virtualHeight int
+	var systemDPI uintptr
+	var scalingFactor float64
+
+	if !wtsMode && passedWidth > 0 && passedHeight > 0 {
+		// Console mode: use passed physical dimensions from main process
+		virtualLeft = 0
+		virtualTop = 0
+		virtualWidth = passedWidth
+		virtualHeight = passedHeight
+		systemDPI = 96 // Default for logging
+		scalingFactor = 1.0
+		fmt.Printf("Console mode: Using passed dimensions %dx%d\n", virtualWidth, virtualHeight)
+	} else {
+		// RDP mode or fallback: use original detection logic
+		systemDPI, _, _ = procGetDpiForSystem.Call()
+		if systemDPI == 0 {
+			systemDPI = 96
+		}
+		scalingFactor = float64(systemDPI) / 96.0
+		if wtsMode {
+			scalingFactor = 1.0 // Don't scale for RDP
+		}
+
+		logicalLeft, _, _ := procGetSystemMetrics.Call(SM_XVIRTUALSCREEN)
+		logicalTop, _, _ := procGetSystemMetrics.Call(SM_YVIRTUALSCREEN)
+		logicalWidth, _, _ := procGetSystemMetrics.Call(SM_CXVIRTUALSCREEN)
+		logicalHeight, _, _ := procGetSystemMetrics.Call(SM_CYVIRTUALSCREEN)
+
+		virtualLeft = int(logicalLeft)
+		virtualTop = int(logicalTop)
+		virtualWidth = int(logicalWidth)
+		virtualHeight = int(logicalHeight)
+		fmt.Printf("RDP/fallback mode: Using detected dimensions %dx%d\n", virtualWidth, virtualHeight)
 	}
-
-	// Calculate scaling factor (96 DPI = 100%, 120 DPI = 125%, 144 DPI = 150%, etc.)
-	scalingFactor := float64(systemDPI) / 96.0
-
-	// Get logical screen dimensions
-	logicalLeft, _, _ := procGetSystemMetrics.Call(SM_XVIRTUALSCREEN)
-	logicalTop, _, _ := procGetSystemMetrics.Call(SM_YVIRTUALSCREEN)
-	logicalWidth, _, _ := procGetSystemMetrics.Call(SM_CXVIRTUALSCREEN)
-	logicalHeight, _, _ := procGetSystemMetrics.Call(SM_CYVIRTUALSCREEN)
-
-	// Calculate physical dimensions by applying scaling factor
-	virtualLeft := int(float64(logicalLeft) * scalingFactor)
-	virtualTop := int(float64(logicalTop) * scalingFactor)
-	virtualWidth := int(float64(logicalWidth) * scalingFactor)
-	virtualHeight := int(float64(logicalHeight) * scalingFactor)
 
 	// Debug info - write to a debug file
 	debugInfo := fmt.Sprintf("SYSTEM DPI: %d\n", systemDPI)
 	debugInfo += fmt.Sprintf("SCALING FACTOR: %.2f (%.0f%%)\n", scalingFactor, scalingFactor*100)
-	debugInfo += fmt.Sprintf("LOGICAL DIMENSIONS: Left=%d, Top=%d, Width=%d, Height=%d\n",
-		logicalLeft, logicalTop, logicalWidth, logicalHeight)
-	debugInfo += fmt.Sprintf("CALCULATED PHYSICAL DIMENSIONS: Left=%d, Top=%d, Width=%d, Height=%d\n",
+	debugInfo += fmt.Sprintf("PASSED DIMENSIONS: %dx%d\n", passedWidth, passedHeight)
+	debugInfo += fmt.Sprintf("FINAL VIRTUAL DIMENSIONS: Left=%d, Top=%d, Width=%d, Height=%d\n",
 		virtualLeft, virtualTop, virtualWidth, virtualHeight)
 
 	// Get desktop DC - try display device context for physical pixels
@@ -430,9 +478,12 @@ func executeScreenCaptureHelper(sessionID, outputPath string, wtsMode bool) erro
 		scaleFactorX := float64(virtualWidth) / float64(targetWidth)
 		targetHeight = int(float64(virtualHeight) / scaleFactorX)
 	} else {
-		// For console, use calculated physical dimensions
+		// For console, use the passed/calculated dimensions directly
 		targetWidth = virtualWidth
 		targetHeight = virtualHeight
+
+		debugInfo += fmt.Sprintf("CONSOLE MODE: Using full dimensions %dx%d\n",
+			targetWidth, targetHeight)
 	}
 
 	debugInfo += fmt.Sprintf("TARGET DIMENSIONS: Width=%d, Height=%d\n", targetWidth, targetHeight)
@@ -453,23 +504,33 @@ func executeScreenCaptureHelper(sessionID, outputPath string, wtsMode bool) erro
 
 	// Perform screen capture
 	var result uintptr
-	if wtsMode && (targetWidth != int(virtualWidth) || targetHeight != int(virtualHeight)) {
-		// For RDP with scaling, use StretchBlt
-		result, _, err = procStretchBlt.Call(
-			hMemoryDC, 0, 0, uintptr(targetWidth), uintptr(targetHeight),
-			hDesktopDC, uintptr(virtualLeft), uintptr(virtualTop),
-			uintptr(virtualWidth), uintptr(virtualHeight),
-			SRCCOPY,
-		)
-		debugInfo += fmt.Sprintf("CAPTURE METHOD: StretchBlt (scaled)\n")
+	if wtsMode {
+		// RDP: Use existing logic with scaling
+		if targetWidth != virtualWidth || targetHeight != virtualHeight {
+			result, _, err = procStretchBlt.Call(
+				hMemoryDC, 0, 0, uintptr(targetWidth), uintptr(targetHeight),
+				hDesktopDC, uintptr(virtualLeft), uintptr(virtualTop),
+				uintptr(virtualWidth), uintptr(virtualHeight),
+				SRCCOPY,
+			)
+			debugInfo += fmt.Sprintf("CAPTURE METHOD: StretchBlt (RDP scaled)\n")
+		} else {
+			result, _, err = procBitBlt.Call(
+				hMemoryDC, 0, 0, uintptr(targetWidth), uintptr(targetHeight),
+				hDesktopDC, uintptr(virtualLeft), uintptr(virtualTop),
+				SRCCOPY,
+			)
+			debugInfo += fmt.Sprintf("CAPTURE METHOD: BitBlt (RDP full)\n")
+		}
 	} else {
-		// For console or non-scaled capture, use BitBlt
+		// Console: Use BitBlt with full physical dimensions
 		result, _, err = procBitBlt.Call(
 			hMemoryDC, 0, 0, uintptr(targetWidth), uintptr(targetHeight),
 			hDesktopDC, uintptr(virtualLeft), uintptr(virtualTop),
 			SRCCOPY,
 		)
-		debugInfo += fmt.Sprintf("CAPTURE METHOD: BitBlt (full size)\n")
+		debugInfo += fmt.Sprintf("CAPTURE METHOD: Console BitBlt (%dx%d from %d,%d)\n",
+			targetWidth, targetHeight, virtualLeft, virtualTop)
 	}
 
 	if result == 0 {
@@ -869,7 +930,6 @@ func isRunningAsSystem() bool {
 		strings.Contains(usernameLower, "network service")
 }
 
-// captureScreenViaHelper launches helper executable in target session
 func captureScreenViaHelper(sessionID, timestamp string) CommandResult {
 	tempDir := "C:\\ProgramData\\DeviceAgent\\temp"
 	err := os.MkdirAll(tempDir, 0755)
@@ -883,6 +943,11 @@ func captureScreenViaHelper(sessionID, timestamp string) CommandResult {
 
 	outputPath := fmt.Sprintf("%s\\screenshot_%s_%s.jpg", tempDir, sessionID, timestamp)
 
+	// Get the correct dimensions from main process (which detects DPI correctly)
+	screenInfo := getScreenDimensions(&[]string{})
+	physicalWidth := screenInfo.virtualWidth
+	physicalHeight := screenInfo.virtualHeight
+
 	exePath, err := os.Executable()
 	if err != nil {
 		return CommandResult{
@@ -892,7 +957,7 @@ func captureScreenViaHelper(sessionID, timestamp string) CommandResult {
 		}
 	}
 
-	result := launchHelperInSession(exePath, sessionID, outputPath)
+	result := launchHelperInSession(exePath, sessionID, outputPath, physicalWidth, physicalHeight)
 	if result.Status == "error" {
 		return result
 	}
@@ -905,13 +970,13 @@ func captureScreenDirect(sessionID, timestamp string) CommandResult {
 	return captureScreenNative(sessionID, timestamp)
 }
 
-// launchHelperInSession launches the helper executable in the specified session
-func launchHelperInSession(exePath, sessionID, outputPath string) CommandResult {
+func launchHelperInSession(exePath, sessionID, outputPath string, physicalWidth, physicalHeight int) CommandResult {
 	var diagnostics []string
 	diagnostics = append(diagnostics, "=== LAUNCHING HELPER IN SESSION ===")
 	diagnostics = append(diagnostics, fmt.Sprintf("Executable: %s", exePath))
 	diagnostics = append(diagnostics, fmt.Sprintf("Session ID: %s", sessionID))
 	diagnostics = append(diagnostics, fmt.Sprintf("Output path: %s", outputPath))
+	diagnostics = append(diagnostics, fmt.Sprintf("Physical dimensions: %dx%d", physicalWidth, physicalHeight))
 
 	sessionIDNum := uint32(0)
 	if _, err := fmt.Sscanf(sessionID, "%d", &sessionIDNum); err != nil {
@@ -958,7 +1023,9 @@ func launchHelperInSession(exePath, sessionID, outputPath string) CommandResult 
 		diagnostics = append(diagnostics, "Environment block created successfully")
 	}
 
-	commandLine := fmt.Sprintf(`"%s" capture-screen --session %s --output "%s"`, exePath, sessionID, outputPath)
+	// Update the command line to include physical dimensions
+	commandLine := fmt.Sprintf(`"%s" capture-screen --session %s --output "%s" --width %d --height %d`,
+		exePath, sessionID, outputPath, physicalWidth, physicalHeight)
 	commandLinePtr, err := windows.UTF16PtrFromString(commandLine)
 	if err != nil {
 		diagnostics = append(diagnostics, fmt.Sprintf("Failed to convert command line: %v", err))
@@ -1149,7 +1216,24 @@ func captureScreenNative(sessionID, timestamp string) CommandResult {
 	}
 	defer procSelectObject.Call(hMemoryDC, hOldBitmap)
 
+	diagnostics = append(diagnostics, fmt.Sprintf("About to call BitBlt with: src(%d,%d) size(%dx%d)", virtualLeft, virtualTop, virtualWidth, virtualHeight))
+
 	result, _, err := procBitBlt.Call(
+		hMemoryDC,
+		0, 0,
+		uintptr(virtualWidth), uintptr(virtualHeight),
+		hDesktopDC,
+		uintptr(virtualLeft), uintptr(virtualTop),
+		SRCCOPY,
+	)
+
+	if result == 0 {
+		diagnostics = append(diagnostics, fmt.Sprintf("BitBlt failed: %v", err))
+	} else {
+		diagnostics = append(diagnostics, fmt.Sprintf("BitBlt succeeded with dimensions %dx%d", virtualWidth, virtualHeight))
+	}
+
+	result, _, err = procBitBlt.Call(
 		hMemoryDC,
 		0, 0,
 		uintptr(virtualWidth), uintptr(virtualHeight),
@@ -1352,6 +1436,7 @@ func getScreenDimensions(diagnostics *[]string) ScreenInfo {
 
 	*diagnostics = append(*diagnostics, fmt.Sprintf("System DPI: %d", systemDPI))
 
+	// Get both DPI-aware and raw pixel dimensions
 	if procGetSystemMetricsForDpi.Find() == nil {
 		*diagnostics = append(*diagnostics, "Using DPI-aware GetSystemMetricsForDpi")
 
@@ -1364,6 +1449,8 @@ func getScreenDimensions(diagnostics *[]string) ScreenInfo {
 		info.virtualTop = int(virtualTop)
 		info.virtualWidth = int(virtualWidth)
 		info.virtualHeight = int(virtualHeight)
+
+		*diagnostics = append(*diagnostics, fmt.Sprintf("DPI-aware dimensions: %dx%d", info.virtualWidth, info.virtualHeight))
 	} else {
 		*diagnostics = append(*diagnostics, "GetSystemMetricsForDpi not available, using standard GetSystemMetrics")
 
@@ -1376,6 +1463,20 @@ func getScreenDimensions(diagnostics *[]string) ScreenInfo {
 		info.virtualTop = int(virtualTop)
 		info.virtualWidth = int(virtualWidth)
 		info.virtualHeight = int(virtualHeight)
+
+		*diagnostics = append(*diagnostics, fmt.Sprintf("Standard dimensions: %dx%d", info.virtualWidth, info.virtualHeight))
+	}
+	// Apply scaling factor to get physical dimensions from logical dimensions
+	scalingFactor := float64(systemDPI) / 96.0
+	if scalingFactor > 1.0 {
+		physicalWidth := int(float64(info.virtualWidth) * scalingFactor)
+		physicalHeight := int(float64(info.virtualHeight) * scalingFactor)
+		*diagnostics = append(*diagnostics, fmt.Sprintf("Applying scaling factor %.2f: %dx%d -> %dx%d",
+			scalingFactor, info.virtualWidth, info.virtualHeight, physicalWidth, physicalHeight))
+		info.virtualWidth = physicalWidth
+		info.virtualHeight = physicalHeight
+	} else {
+		*diagnostics = append(*diagnostics, "No scaling needed (100% DPI)")
 	}
 
 	if info.virtualWidth == 0 || info.virtualHeight == 0 {
@@ -1396,7 +1497,8 @@ func getScreenDimensions(diagnostics *[]string) ScreenInfo {
 		}
 	}
 
-	scalingFactor := float64(systemDPI) / 96.0
+	// Calculate scaling factor for info display
+	scalingFactor = float64(systemDPI) / 96.0
 	info.dpiInfo = fmt.Sprintf("DPI: %d, Scaling: %.1f%%", systemDPI, scalingFactor*100)
 
 	*diagnostics = append(*diagnostics, info.dpiInfo)

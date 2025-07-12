@@ -47,6 +47,7 @@ func updateVMDatabase(jwtToken, deviceID string, vms []HyperVVM) error {
 			State:    vm.State,
 			Status:   vm.Status,
 			Health:   vm.Health,
+			Uptime:   vm.Uptime,
 			LastSeen: currentTime,
 		}
 
@@ -65,6 +66,9 @@ func updateVMDatabase(jwtToken, deviceID string, vms []HyperVVM) error {
 		} else {
 			log.Printf("VM %s: version not available", vm.Name)
 		}
+
+		// Debug Uptime
+		log.Printf("VM %s: uptime set to '%s'", vm.Name, record.Uptime)
 
 		vmRecords = append(vmRecords, record)
 	}

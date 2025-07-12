@@ -363,7 +363,7 @@ func registerDevice(jwtToken string) {
 	log.Println("Device registered successfully")
 
 	// Collect and update asset information in background
-	go updateDeviceAssets(jwtToken)
+	//go updateDeviceAssets(jwtToken) // DISABLED FOR TESTING
 }
 
 func updateDeviceAssets(jwtToken string) {
