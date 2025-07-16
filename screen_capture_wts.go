@@ -447,7 +447,7 @@ func waitForWTSHelperAndReadResult(outputPath, sessionID, timestamp string) Comm
 			logs = append(logs, fmt.Sprintf("Output file found, size: %d bytes", currentSize))
 
 			// Wait for file to be reasonably sized
-			if currentSize > 1000 {
+			if currentSize > 100 {
 				// Additional wait to ensure file is fully written
 				time.Sleep(2 * time.Second)
 
