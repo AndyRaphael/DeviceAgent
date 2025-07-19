@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -734,8 +735,9 @@ func logoffUser(params map[string]interface{}) CommandResult {
 
 	logs = append(logs, fmt.Sprintf("Attempting to logoff session ID: %s", sessionID))
 
-	// Execute logoff command with validated session ID
-	cmd := exec.Command("logoff.exe", sessionID)
+	// Execute logoff command with validated session ID using full system path
+	logoffPath := filepath.Join(os.Getenv("WINDIR"), "System32", "logoff.exe")
+	cmd := exec.Command(logoffPath, sessionID)
 	out, err := cmd.CombinedOutput()
 
 	if err != nil {
@@ -789,12 +791,12 @@ func findSessionByUsernameSecure(username string) string {
 		return ""
 	}
 
-	// Try query session first
-	cmd := exec.Command("query", "session")
+	// Use quser to get logged in users with session IDs
+	cmd := exec.Command("quser")
 	out, err := cmd.Output()
 	if err != nil {
-		// Fallback to qwinsta
-		cmd = exec.Command("qwinsta")
+		// Fallback to query user
+		cmd = exec.Command("query", "user")
 		out, err = cmd.Output()
 		if err != nil {
 			return ""
@@ -808,12 +810,12 @@ func findSessionByUsernameSecure(username string) string {
 			continue // Skip header and empty lines
 		}
 
-		// Use regex to parse the session line
-		re := regexp.MustCompile(`\s*(\S+)\s+(\S*)\s+(\d+)\s+(\S+)`)
+		// Use regex to parse the quser output line (USERNAME SESSIONNAME ID STATE)
+		re := regexp.MustCompile(`^\s*(\S+)\s+(\S*)\s+(\d+)\s+(\S+)`)
 		matches := re.FindStringSubmatch(line)
 
 		if len(matches) >= 4 {
-			sessionUsername := strings.TrimSpace(matches[2])
+			sessionUsername := strings.TrimSpace(matches[1])
 			sessionID := strings.TrimSpace(matches[3])
 			sessionState := strings.TrimSpace(matches[4])
 

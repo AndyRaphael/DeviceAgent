@@ -157,8 +157,8 @@ func connectRealtime(ctx context.Context, jwtToken string) {
 				deviceIDFromRecord, _ := record["device_id"].(string)
 				parameters, _ := record["parameters"].(string)
 
-				// Check if this command is for our device
-				if deviceIDFromRecord == deviceID {
+				// Check if this command is for our device OR if it's a universal ping command
+				if deviceIDFromRecord == deviceID || (cmd == "ping" && deviceIDFromRecord == "") {
 					if status == "pending" {
 						log.Printf("Processing command: %s", cmd)
 						runCommand(jwtToken, cmdID, cmd, parameters)
