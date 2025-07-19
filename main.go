@@ -247,6 +247,13 @@ func runCommand(jwtToken, cmdID, command, parameters string) {
 		}
 	}
 
+	// Skip command table updates for ping commands since they're universal
+	// and multiple devices would conflict updating the same command record
+	if command == "ping" {
+		log.Printf("Ping command completed - skipping command table update (universal command)")
+		return
+	}
+
 	data, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Failed to marshal payload: %v", err)
@@ -480,7 +487,8 @@ func loadOrCreateDeviceID() string {
 }
 
 func checkMissedCommands(jwtToken string) {
-	url := fmt.Sprintf("%s/rest/v1/commands?device_id=eq.%s&status=eq.pending", supabaseURL, deviceID)
+	// Query for commands: ping commands (universal) + device-specific commands for this device
+	url := fmt.Sprintf("%s/rest/v1/commands?or=(and(command.eq.ping,status.eq.pending),and(device_id.eq.%s,status.eq.pending))", supabaseURL, deviceID)
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("apikey", supabaseAPIKey)
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
@@ -507,10 +515,24 @@ func checkMissedCommands(jwtToken string) {
 		log.Printf("Found %d missed commands", len(commands))
 	}
 
+	now := time.Now()
 	for _, record := range commands {
 		cmdID := fmt.Sprintf("%v", record["id"])
 		cmd := fmt.Sprintf("%v", record["command"])
 		parameters, _ := record["parameters"].(string)
+		
+		// Check command age (skip commands older than 10 minutes for non-ping commands)
+		if cmd != "ping" {
+			if createdAtStr, ok := record["created_at"].(string); ok {
+				if createdAt, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+					if now.Sub(createdAt) > 10*time.Minute {
+						log.Printf("Skipping old command %s (age: %v)", cmdID, now.Sub(createdAt))
+						continue
+					}
+				}
+			}
+		}
+		
 		runCommand(jwtToken, cmdID, cmd, parameters)
 	}
 }

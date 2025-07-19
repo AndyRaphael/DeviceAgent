@@ -735,7 +735,7 @@ func logoffUser(params map[string]interface{}) CommandResult {
 	logs = append(logs, fmt.Sprintf("Attempting to logoff session ID: %s", sessionID))
 
 	// Execute logoff command with validated session ID
-	cmd := exec.Command("logoff", sessionID)
+	cmd := exec.Command("logoff.exe", sessionID)
 	out, err := cmd.CombinedOutput()
 
 	if err != nil {

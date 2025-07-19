@@ -177,9 +177,9 @@ func getUptime() CommandResult {
 
 					uptimeData = map[string]interface{}{
 						"last_boot_time": bootTime,
-						"uptime_seconds": int(uptime.Seconds()),
-						"uptime_minutes": int(uptime.Minutes()),
-						"uptime_hours":   int(uptime.Hours()),
+						"uptime_seconds": int(uptime.Seconds()) % 60,
+						"uptime_minutes": int(uptime.Minutes()) % 60,
+						"uptime_hours":   int(uptime.Hours()) % 24,
 						"uptime_days":    int(uptime.Hours() / 24),
 						"uptime_human":   uptime.String(),
 						"method":         "powershell_wmi_fallback",
@@ -207,9 +207,9 @@ func getUptime() CommandResult {
 
 				uptimeData = map[string]interface{}{
 					"last_boot_time": bootTime,
-					"uptime_seconds": int(uptime.Seconds()),
-					"uptime_minutes": int(uptime.Minutes()),
-					"uptime_hours":   int(uptime.Hours()),
+					"uptime_seconds": int(uptime.Seconds()) % 60,
+					"uptime_minutes": int(uptime.Minutes()) % 60,
+					"uptime_hours":   int(uptime.Hours()) % 24,
 					"uptime_days":    int(uptime.Hours() / 24),
 					"uptime_human":   uptime.String(),
 					"method":         "powershell_ciminstance",

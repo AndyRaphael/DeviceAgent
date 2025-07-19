@@ -53,11 +53,10 @@ GOOS=darwin GOARCH=amd64 go build -o build/darwin-amd64/deviceservice
 # Run directly
 go run .
 
-# Run as service (platform-specific)
-./deviceservice install  # Install service
-./deviceservice start    # Start service
-./deviceservice stop     # Stop service
-./deviceservice remove   # Remove service
+# Available command line arguments:
+./deviceservice run            # Run the application normally
+./deviceservice service        # Run as service (handles Windows SCM)
+./deviceservice capture-screen # Helper mode for screen capture
 ```
 
 ### Dependencies
