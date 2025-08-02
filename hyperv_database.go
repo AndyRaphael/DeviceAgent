@@ -13,20 +13,35 @@ import (
 
 // HyperVVMRecord represents a VM record in the database
 type HyperVVMRecord struct {
-	ID          string    `json:"id,omitempty"`
-	VMID        string    `json:"vm_id"`
-	VMName      string    `json:"vm_name"`
-	DeviceID    string    `json:"device_id"`
-	State       string    `json:"state"`
-	Status      string    `json:"status"`
-	Health      string    `json:"health"`
-	Uptime      string    `json:"uptime"`
-	Generation  *int      `json:"generation,omitempty"`
-	Version     *string   `json:"version,omitempty"`
-	FirstSeen   time.Time `json:"first_seen"`
-	LastSeen    time.Time `json:"last_seen"`
-	LastUpdated time.Time `json:"last_updated"`
-	IsDeleted   bool      `json:"is_deleted"`
+	ID                           string      `json:"id,omitempty"`
+	VMID                         string      `json:"vm_id"`
+	VMName                       string      `json:"vm_name"`
+	DeviceID                     string      `json:"device_id"`
+	State                        string      `json:"state"`
+	Status                       string      `json:"status"`
+	Health                       string      `json:"health"`
+	Uptime                       string      `json:"uptime"`
+	Generation                   *int        `json:"generation,omitempty"`
+	Version                      *string     `json:"version,omitempty"`
+	ProcessorCount               *int        `json:"processor_count,omitempty"`
+	MemoryAssignedMB             *int        `json:"memory_assigned_mb,omitempty"`
+	HardDrives                   interface{} `json:"hard_drives,omitempty"`
+	DynamicMemoryEnabled         *bool       `json:"dynamic_memory_enabled,omitempty"`
+	EnhancedSessionTransportType *string     `json:"enhanced_session_transport_type,omitempty"`
+	GuestServiceInterfaceEnabled *bool       `json:"guest_service_interface_enabled,omitempty"`
+	CreationTime                 *string     `json:"creation_time,omitempty"`
+	GuestInterfaceAddresses      interface{} `json:"guest_interface_addresses,omitempty"`
+	TrustedPlatformModule        *bool       `json:"trusted_platform_module,omitempty"`
+	SecureBoot                   *bool       `json:"secure_boot,omitempty"`
+	AutomaticCheckpointsEnabled  *bool       `json:"automatic_checkpoints_enabled,omitempty"`
+	OperationalStatus            interface{} `json:"operational_status,omitempty"`
+	ReplicationState             *string     `json:"replication_state,omitempty"`
+	ReplicationHealth            *string     `json:"replication_health,omitempty"`
+	ReplicationMode              *string     `json:"replication_mode,omitempty"`
+	FirstSeen                    time.Time   `json:"first_seen"`
+	LastSeen                     time.Time   `json:"last_seen"`
+	LastUpdated                  time.Time   `json:"last_updated"`
+	IsDeleted                    bool        `json:"is_deleted"`
 }
 
 // SAFE REPLACEMENT for updateVMDatabase function in hyperv_database.go
@@ -41,34 +56,38 @@ func updateVMDatabase(jwtToken, deviceID string, vms []HyperVVM) error {
 
 	for _, vm := range vms {
 		record := HyperVVMRecord{
-			VMID:     vm.ID,
-			VMName:   vm.Name,
-			DeviceID: deviceID,
-			State:    vm.State,
-			Status:   vm.Status,
-			Health:   vm.Health,
-			Uptime:   vm.Uptime,
-			LastSeen: currentTime,
+			VMID:                         vm.ID,
+			VMName:                       vm.Name,
+			DeviceID:                     deviceID,
+			State:                        vm.State,
+			Status:                       vm.Status,
+			Health:                       vm.Health,
+			Uptime:                       vm.Uptime,
+			LastSeen:                     currentTime,
+			Generation:                   vm.Generation,
+			Version:                      vm.Version,
+			ProcessorCount:               vm.ProcessorCount,
+			MemoryAssignedMB:             vm.MemoryAssignedMB,
+			HardDrives:                   vm.HardDrives,
+			DynamicMemoryEnabled:         vm.DynamicMemoryEnabled,
+			EnhancedSessionTransportType: vm.EnhancedSessionTransportType,
+			GuestServiceInterfaceEnabled: vm.GuestServiceInterfaceEnabled,
+			CreationTime:                 vm.CreationTime,
+			GuestInterfaceAddresses:      vm.GuestInterfaceAddresses,
+			TrustedPlatformModule:        vm.TrustedPlatformModule,
+			SecureBoot:                   vm.SecureBoot,
+			AutomaticCheckpointsEnabled:  vm.AutomaticCheckpointsEnabled,
+			OperationalStatus:            vm.OperationalStatus,
+			ReplicationState:             vm.ReplicationState,
+			ReplicationHealth:            vm.ReplicationHealth,
+			ReplicationMode:              vm.ReplicationMode,
 		}
 
-		// Set generation
-		if vm.Generation != nil && *vm.Generation > 0 {
-			record.Generation = vm.Generation
-			log.Printf("VM %s: generation set to %d", vm.Name, *vm.Generation)
-		} else {
-			log.Printf("VM %s: generation not available", vm.Name)
-		}
-
-		// Set version
-		if vm.Version != nil && *vm.Version != "" {
-			record.Version = vm.Version
-			log.Printf("VM %s: version set to %s", vm.Name, *vm.Version)
-		} else {
-			log.Printf("VM %s: version not available", vm.Name)
-		}
-
-		// Debug Uptime
-		log.Printf("VM %s: uptime set to '%s'", vm.Name, record.Uptime)
+		// Debug logging for key fields
+		log.Printf("VM %s: generation=%v, version=%v, processor_count=%v, memory_assigned_mb=%v",
+			vm.Name, record.Generation, record.Version, record.ProcessorCount, record.MemoryAssignedMB)
+		log.Printf("VM %s: dynamic_memory=%v",
+			vm.Name, record.DynamicMemoryEnabled)
 
 		vmRecords = append(vmRecords, record)
 	}
@@ -142,6 +161,51 @@ func updateVMRecord(jwtToken, recordID string, record HyperVVMRecord) error {
 	if record.Version != nil {
 		updateData["version"] = *record.Version
 	}
+	if record.ProcessorCount != nil {
+		updateData["processor_count"] = *record.ProcessorCount
+	}
+	if record.MemoryAssignedMB != nil {
+		updateData["memory_assigned_mb"] = *record.MemoryAssignedMB
+	}
+	if record.HardDrives != nil {
+		updateData["hard_drives"] = record.HardDrives
+	}
+	if record.DynamicMemoryEnabled != nil {
+		updateData["dynamic_memory_enabled"] = *record.DynamicMemoryEnabled
+	}
+	if record.EnhancedSessionTransportType != nil {
+		updateData["enhanced_session_transport_type"] = *record.EnhancedSessionTransportType
+	}
+	if record.GuestServiceInterfaceEnabled != nil {
+		updateData["guest_service_interface_enabled"] = *record.GuestServiceInterfaceEnabled
+	}
+	if record.CreationTime != nil {
+		updateData["creation_time"] = *record.CreationTime
+	}
+	if record.GuestInterfaceAddresses != nil {
+		updateData["guest_interface_addresses"] = record.GuestInterfaceAddresses
+	}
+	if record.TrustedPlatformModule != nil {
+		updateData["trusted_platform_module"] = *record.TrustedPlatformModule
+	}
+	if record.SecureBoot != nil {
+		updateData["secure_boot"] = *record.SecureBoot
+	}
+	if record.AutomaticCheckpointsEnabled != nil {
+		updateData["automatic_checkpoints_enabled"] = *record.AutomaticCheckpointsEnabled
+	}
+	if record.OperationalStatus != nil {
+		updateData["operational_status"] = record.OperationalStatus
+	}
+	if record.ReplicationState != nil {
+		updateData["replication_state"] = *record.ReplicationState
+	}
+	if record.ReplicationHealth != nil {
+		updateData["replication_health"] = *record.ReplicationHealth
+	}
+	if record.ReplicationMode != nil {
+		updateData["replication_mode"] = *record.ReplicationMode
+	}
 
 	data, err := json.Marshal(updateData)
 	if err != nil {
@@ -184,7 +248,75 @@ func insertVMRecord(jwtToken string, record HyperVVMRecord) error {
 	record.LastUpdated = now
 	record.IsDeleted = false
 
-	data, err := json.Marshal(record)
+	// Create a clean record for insertion (remove the ID field)
+	insertRecord := map[string]interface{}{
+		"vm_id":        record.VMID,
+		"vm_name":      record.VMName,
+		"device_id":    record.DeviceID,
+		"state":        record.State,
+		"status":       record.Status,
+		"health":       record.Health,
+		"uptime":       record.Uptime,
+		"first_seen":   record.FirstSeen.Format(time.RFC3339),
+		"last_seen":    record.LastSeen.Format(time.RFC3339),
+		"last_updated": record.LastUpdated.Format(time.RFC3339),
+		"is_deleted":   record.IsDeleted,
+	}
+
+	// Add optional fields if they have values
+	if record.Generation != nil {
+		insertRecord["generation"] = *record.Generation
+	}
+	if record.Version != nil {
+		insertRecord["version"] = *record.Version
+	}
+	if record.ProcessorCount != nil {
+		insertRecord["processor_count"] = *record.ProcessorCount
+	}
+	if record.MemoryAssignedMB != nil {
+		insertRecord["memory_assigned_mb"] = *record.MemoryAssignedMB
+	}
+	if record.HardDrives != nil {
+		insertRecord["hard_drives"] = record.HardDrives
+	}
+	if record.DynamicMemoryEnabled != nil {
+		insertRecord["dynamic_memory_enabled"] = *record.DynamicMemoryEnabled
+	}
+	if record.EnhancedSessionTransportType != nil {
+		insertRecord["enhanced_session_transport_type"] = *record.EnhancedSessionTransportType
+	}
+	if record.GuestServiceInterfaceEnabled != nil {
+		insertRecord["guest_service_interface_enabled"] = *record.GuestServiceInterfaceEnabled
+	}
+	if record.CreationTime != nil {
+		insertRecord["creation_time"] = *record.CreationTime
+	}
+	if record.GuestInterfaceAddresses != nil {
+		insertRecord["guest_interface_addresses"] = record.GuestInterfaceAddresses
+	}
+	if record.TrustedPlatformModule != nil {
+		insertRecord["trusted_platform_module"] = *record.TrustedPlatformModule
+	}
+	if record.SecureBoot != nil {
+		insertRecord["secure_boot"] = *record.SecureBoot
+	}
+	if record.AutomaticCheckpointsEnabled != nil {
+		insertRecord["automatic_checkpoints_enabled"] = *record.AutomaticCheckpointsEnabled
+	}
+	if record.OperationalStatus != nil {
+		insertRecord["operational_status"] = record.OperationalStatus
+	}
+	if record.ReplicationState != nil {
+		insertRecord["replication_state"] = *record.ReplicationState
+	}
+	if record.ReplicationHealth != nil {
+		insertRecord["replication_health"] = *record.ReplicationHealth
+	}
+	if record.ReplicationMode != nil {
+		insertRecord["replication_mode"] = *record.ReplicationMode
+	}
+
+	data, err := json.Marshal(insertRecord)
 	if err != nil {
 		return err
 	}

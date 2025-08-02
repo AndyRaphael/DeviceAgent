@@ -17,6 +17,7 @@ This is a Go-based RMM (Remote Monitoring and Management) device agent that conn
 - **service.go**: Cross-platform service installation and management
 - **device_assets.go**: Hardware and system information collection
 - **hyperv.go**: Hyper-V virtual machine management functionality
+- **hyperv_database.go**: Hyper-V database persistence and synchronization
 - **screen_capture.go**: Screen capture functionality with platform-specific implementations
 
 ### Refactored Function Files
@@ -32,6 +33,11 @@ This is a Go-based RMM (Remote Monitoring and Management) device agent that conn
 - **service_unix.go**: Unix/Linux service implementation  
 - **screen_capture_wts.go**: Windows Terminal Services screen capture
 - **screen_capture_stub.go**: Stub implementation for unsupported platforms
+
+### Documentation
+
+- **docs/**: Comprehensive documentation directory
+  - **docs/hyperv.md**: Complete Hyper-V management documentation
 
 ## Build and Development
 
@@ -77,13 +83,29 @@ The agent implements a comprehensive command execution system with:
 - **Platform support**: Cross-platform command execution
 - **Error handling**: Structured error reporting and logging
 
-Key command types include:
+### Command Categories
+
+#### System Commands
 - System information collection
 - Process management
 - File operations
 - Screenshot capture
-- Hyper-V VM management
 - System shutdown/reboot
+
+#### Hyper-V Commands
+- **Inventory Management**: `hyperv_inventory`, `hyperv_inventory_db`, `hyperv_get_vms`, `hyperv_sync`
+- **VM Control**: `hyperv_start`, `hyperv_pause`, `hyperv_reset`, `hyperv_turnoff`, `hyperv_shutdown`
+- **VM Monitoring**: `hyperv_screenshot` with security validation
+
+#### Hyper-V Data Collection
+The Hyper-V system collects comprehensive VM information including:
+- **Hardware Configuration**: Processor count, memory allocation, hard drives
+- **Guest Operating System**: OS name, version, architecture, family
+- **Network Information**: IP addresses, subnets for running VMs
+- **Performance Metrics**: CPU and memory usage percentages
+- **Security Features**: TPM, Secure Boot, Enhanced Session Transport
+- **Backup & Replication**: Status, health, mode, frequency
+- **Timestamps**: Creation time, last boot, last shutdown
 
 ## Security Features
 
@@ -93,6 +115,8 @@ Key command types include:
 - Safe character validation for usernames
 - Delay parameter validation for system operations
 - Structured logging without sensitive data exposure
+- PowerShell input sanitization for Hyper-V operations
+- Comprehensive VM ID validation and sanitization
 
 ## Device Management
 
@@ -102,12 +126,32 @@ Key command types include:
 - **Command Processing**: Real-time command execution via WebSocket
 - **Reconnection**: Automatic reconnection with exponential backoff
 
+## Database Integration
+
+### Hyper-V Database Schema
+The system maintains a comprehensive `hyperv_vms` table with:
+- **Basic Information**: VM ID, name, state, status, health, uptime
+- **Hardware Configuration**: Processor count, memory, hard drives, dynamic memory
+- **Guest OS Details**: Operating system information and architecture
+- **Network Information**: IP addresses and subnet data (JSONB)
+- **Security Features**: TPM, Secure Boot, checkpoint settings
+- **Performance Metrics**: CPU and memory usage percentages
+- **Backup & Replication**: Comprehensive status tracking
+- **Audit Trail**: First seen, last seen, last updated timestamps
+
+### Database Operations
+- **Upsert Logic**: Intelligent insert/update operations
+- **Soft Delete**: Mark missing VMs as deleted
+- **Error Handling**: Graceful handling of database failures
+- **Batch Processing**: Efficient processing of multiple VMs
+
 ## Configuration
 
 Core configuration is in `config.go` with Supabase connection details. The agent uses:
 - Database schema: `public`
 - Commands table: `commands`
 - Devices table: `devices`
+- Hyper-V VMs table: `hyperv_vms`
 - WebSocket realtime channel for command delivery
 
 ## File Structure
@@ -119,16 +163,43 @@ Core configuration is in `config.go` with Supabase connection details. The agent
 ├── config.go            # Configuration constants
 ├── service.go           # Service management
 ├── device_assets.go     # System information collection
-├── hyperv.go            # Hyper-V management
+├── hyperv.go            # Hyper-V management operations
+├── hyperv_database.go   # Hyper-V database persistence
 ├── screen_capture*.go   # Screen capture implementations
 ├── service_*.go         # Platform-specific service code
 ├── validation.go        # Input validation functions
 ├── result.go            # CommandResult constructors
 ├── system_info.go       # Basic system information functions
 ├── storage.go           # Disk space management functions
+├── docs/                # Documentation directory
+│   └── hyperv.md       # Comprehensive Hyper-V documentation
 ├── build/               # Cross-compiled binaries
 └── versioninfo.json     # Windows executable metadata
 ```
+
+## Hyper-V Management
+
+### Platform Support
+- **Windows Only**: Hyper-V commands are Windows-specific
+- **Requirements**: Hyper-V role installed and enabled
+- **Privileges**: Administrative access required for VM operations
+- **PowerShell**: Requires PowerShell with Hyper-V cmdlets
+
+### Key Features
+- **Comprehensive Inventory**: 29+ data fields per VM
+- **Real-time Control**: Start, stop, pause, reset operations
+- **Screenshot Capture**: Secure VM screen capture with validation
+- **Database Persistence**: Full audit trail and history tracking
+- **Performance Monitoring**: CPU and memory usage tracking
+- **Security Validation**: Input sanitization and injection prevention
+
+### Data Collection Capabilities
+- **Hardware Information**: Processors, memory, storage devices
+- **Guest OS Details**: Operating system and version information
+- **Network Configuration**: IP addresses and network interfaces
+- **Security Status**: TPM, Secure Boot, checkpoint settings
+- **Performance Metrics**: Resource usage and utilization
+- **Backup & Replication**: Status and configuration details
 
 ## Development Notes
 
@@ -137,3 +208,6 @@ Core configuration is in `config.go` with Supabase connection details. The agent
 - WebSocket connection includes Phoenix framework heartbeat protocol
 - Command results use structured JSON with separate result/logs fields
 - Device ID persistence uses platform-appropriate system directories
+- Hyper-V functionality includes comprehensive error handling and security validation
+- Database operations implement intelligent upsert logic with audit trails
+- PowerShell integration uses enhanced scripts for comprehensive data collection

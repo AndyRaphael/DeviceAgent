@@ -12,14 +12,29 @@ import (
 
 // HyperVVM represents a Hyper-V virtual machine
 type HyperVVM struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	State      string  `json:"state"`
-	Status     string  `json:"status"`
-	Health     string  `json:"health"`
-	Uptime     string  `json:"uptime"`
-	Generation *int    `json:"generation,omitempty"`
-	Version    *string `json:"version,omitempty"`
+	ID                           string      `json:"id"`
+	Name                         string      `json:"name"`
+	State                        string      `json:"state"`
+	Status                       string      `json:"status"`
+	Health                       string      `json:"health"`
+	Uptime                       string      `json:"uptime"`
+	Generation                   *int        `json:"generation,omitempty"`
+	Version                      *string     `json:"version,omitempty"`
+	ProcessorCount               *int        `json:"processor_count,omitempty"`
+	MemoryAssignedMB             *int        `json:"memory_assigned_mb,omitempty"`
+	HardDrives                   interface{} `json:"hard_drives,omitempty"`
+	DynamicMemoryEnabled         *bool       `json:"dynamic_memory_enabled,omitempty"`
+	EnhancedSessionTransportType *string     `json:"enhanced_session_transport_type,omitempty"`
+	GuestServiceInterfaceEnabled *bool       `json:"guest_service_interface_enabled,omitempty"`
+	CreationTime                 *string     `json:"creation_time,omitempty"`
+	GuestInterfaceAddresses      interface{} `json:"guest_interface_addresses,omitempty"`
+	TrustedPlatformModule        *bool       `json:"trusted_platform_module,omitempty"`
+	SecureBoot                   *bool       `json:"secure_boot,omitempty"`
+	AutomaticCheckpointsEnabled  *bool       `json:"automatic_checkpoints_enabled,omitempty"`
+	OperationalStatus            interface{} `json:"operational_status,omitempty"`
+	ReplicationState             *string     `json:"replication_state,omitempty"`
+	ReplicationHealth            *string     `json:"replication_health,omitempty"`
+	ReplicationMode              *string     `json:"replication_mode,omitempty"`
 }
 
 // executeHyperVInventory gets an inventory of all virtual machines and updates the database
@@ -71,8 +86,9 @@ func executeHyperVInventory() CommandResult {
 func getVMsFromPowerShell() ([]HyperVVM, error) {
 	// Enhanced PowerShell script to collect all VM properties
 	script := `
-		Get-VM | ForEach-Object {
-		$vm = $_
+		$allVMs = @()
+		$vms = Get-VM
+		foreach ($vm in $vms) {
 		$uptime = ""
 		
 		if ($vm.State -eq "Running" -and $vm.Uptime) {
@@ -110,35 +126,151 @@ func getVMsFromPowerShell() ([]HyperVVM, error) {
 			$healthStatus = "Unknown"
 		}
 		
-		[PSCustomObject]@{
-			Id = $vm.Id.ToString()
-			Name = $vm.Name
-			State = $vm.State.ToString()
-			Status = $vm.Status.ToString()
-			Health = $healthStatus
-			Uptime = $uptime
-			Generation = if ($generation -ne $null) { [int]$generation } else { $null }
-			Version = $version
+		# Get hard drives information with VHD details
+		$hardDrives = @()
+		try {
+			$vmHardDrives = Get-VMHardDiskDrive -VM $vm
+			foreach ($drive in $vmHardDrives) {
+				$vhdInfo = $null
+				try {
+					# Check if the VHD file exists before trying to get its info
+					if (Test-Path $drive.Path) {
+						$vhd = Get-VHD -Path $drive.Path -ErrorAction Stop
+						$vhdInfo = @{
+							vhd_type = $vhd.VhdType.ToString()
+							provisioned_gb = [math]::Round($vhd.Size / 1GB, 2)
+							committed_gb = [math]::Round($vhd.FileSize / 1GB, 2)
+						}
+					} else {
+						# If VHD file doesn't exist, try to get basic info from the drive object
+						$vhdInfo = @{
+							vhd_type = "Unknown"
+							provisioned_gb = $null
+							committed_gb = $null
+						}
+					}
+				} catch {
+					# If Get-VHD fails, create basic info
+					$vhdInfo = @{
+						vhd_type = "Unknown"
+						provisioned_gb = $null
+						committed_gb = $null
+					}
+				}
+				
+				$hardDrives += @{
+					path = $drive.Path
+					controller_type = $drive.ControllerType
+					controller_number = $drive.ControllerNumber
+					controller_location = $drive.ControllerLocation
+					vhd_type = $vhdInfo.vhd_type
+					provisioned_gb = $vhdInfo.provisioned_gb
+					committed_gb = $vhdInfo.committed_gb
+				}
+			}
+		} catch {
+			$hardDrives = $null
 		}
-	} | ConvertTo-Json -Depth 3
+		
+		# Get guest network interface information
+		$guestInterfaceAddresses = @()
+		try {
+			if ($vm.State -eq "Running") {
+				$guestInterfaces = Get-VMNetworkAdapter -VM $vm
+				foreach ($interface in $guestInterfaces) {
+					if ($interface.IPAddresses) {
+						$guestInterfaceAddresses += $interface.IPAddresses
+					}
+				}
+			}
+		} catch {
+			$guestInterfaceAddresses = $null
+		}
+		
+		# Get operational status details
+		$operationalStatus = @()
+		try {
+			if ($vm.OperationalStatus) {
+				foreach ($status in $vm.OperationalStatus) {
+					$operationalStatus += $status.ToString()
+				}
+			}
+		} catch {
+			$operationalStatus = $null
+		}
+		
+
+		
+		$vmObject = [PSCustomObject]@{
+			id = $vm.Id.ToString()
+			name = $vm.Name
+			state = $vm.State.ToString()
+			status = $vm.Status.ToString()
+			health = $healthStatus
+			uptime = $uptime
+			generation = if ($generation -ne $null) { [int]$generation } else { $null }
+			version = $version
+			processor_count = if ($vm.ProcessorCount) { [int]$vm.ProcessorCount } else { $null }
+			memory_assigned_mb = if ($vm.MemoryAssigned) { [math]::Round($vm.MemoryAssigned / 1MB) } else { $null }
+			hard_drives = $hardDrives
+			dynamic_memory_enabled = if ($vm.DynamicMemoryEnabled -ne $null) { [bool]$vm.DynamicMemoryEnabled } else { $null }
+			enhanced_session_transport_type = if ($vm.EnhancedSessionTransportType) { $vm.EnhancedSessionTransportType.ToString() } else { $null }
+			guest_service_interface_enabled = if ($vm.GuestServiceInterfaceEnabled -ne $null) { [bool]$vm.GuestServiceInterfaceEnabled } else { $null }
+			creation_time = if ($vm.CreationTime) { $vm.CreationTime.ToString("yyyy-MM-ddTHH:mm:ssZ") } else { $null }
+			guest_interface_addresses = $guestInterfaceAddresses
+			trusted_platform_module = if ($vm.TrustedPlatformModule -ne $null) { [bool]$vm.TrustedPlatformModule } else { $null }
+			secure_boot = if ($vm.SecureBoot -ne $null) { [bool]$vm.SecureBoot } else { $null }
+			automatic_checkpoints_enabled = if ($vm.AutomaticCheckpointsEnabled -ne $null) { [bool]$vm.AutomaticCheckpointsEnabled } else { $null }
+			operational_status = $operationalStatus
+			replication_state = if ($vm.ReplicationState) { $vm.ReplicationState.ToString() } else { $null }
+			replication_health = if ($vm.ReplicationHealth) { $vm.ReplicationHealth.ToString() } else { $null }
+			replication_mode = if ($vm.ReplicationMode) { $vm.ReplicationMode.ToString() } else { $null }
+		}
+		$allVMs += $vmObject
+		}
+		$jsonArray = @()
+		foreach ($vm in $allVMs) {
+			$jsonArray += $vm
+		}
+		$jsonArray | ConvertTo-Json -Depth 5 -Compress
 	`
 
 	cmd := exec.Command("powershell", "-Command", script)
-	output, err := cmd.Output()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
+		log.Printf("PowerShell execution error: %v", err)
+		log.Printf("PowerShell error output: %s", string(output))
 		return nil, err
+	}
+
+	// Debug: Log the raw PowerShell output
+	log.Printf("PowerShell output length: %d bytes", len(output))
+	if len(output) > 0 {
+		previewLength := 500
+		if len(output) < previewLength {
+			previewLength = len(output)
+		}
+		log.Printf("PowerShell output preview: %s", string(output[:previewLength]))
+		log.Printf("PowerShell output ends with: %s", string(output[len(output)-100:]))
 	}
 
 	// Parse the JSON output
 	var vms []HyperVVM
+
+	// First try to parse as array
 	if err := json.Unmarshal(output, &vms); err != nil {
+		log.Printf("JSON parsing error (array): %v", err)
 		// Try parsing as single object (in case there's only one VM)
 		var singleVM HyperVVM
 		if err2 := json.Unmarshal(output, &singleVM); err2 == nil {
+			log.Printf("Successfully parsed as single VM object")
 			vms = []HyperVVM{singleVM}
 		} else {
+			log.Printf("JSON parsing error (single VM): %v", err2)
 			return nil, fmt.Errorf("failed to parse VM data: %v", err)
 		}
+	} else {
+		log.Printf("Successfully parsed as VM array with %d VMs", len(vms))
 	}
 
 	return vms, nil
@@ -173,6 +305,14 @@ func executeHyperVInventoryWithDB(jwtToken string) CommandResult {
 		}
 	}
 
+	// Debug: Log the first VM's data to see what we're getting
+	if len(vms) > 0 {
+		log.Printf("DEBUG: First VM data: %+v", vms[0])
+		log.Printf("DEBUG: First VM hard drives: %+v", vms[0].HardDrives)
+		log.Printf("DEBUG: First VM processor count: %+v", vms[0].ProcessorCount)
+		log.Printf("DEBUG: First VM memory: %+v", vms[0].MemoryAssignedMB)
+	}
+
 	// Update database with enhanced inventory
 	dbUpdateError := ""
 	if err := updateVMDatabase(jwtToken, deviceID, vms); err != nil {
@@ -187,7 +327,7 @@ func executeHyperVInventoryWithDB(jwtToken string) CommandResult {
 		"timestamp":        time.Now().UTC().Format(time.RFC3339),
 		"source":           "live_powershell_enhanced_with_db_update",
 		"database_updated": dbUpdateError == "",
-		"data_fields":      []string{"id", "name", "state", "status", "health", "uptime", "generation", "version"},
+		"data_fields":      []string{"id", "name", "state", "status", "health", "uptime", "generation", "version", "processor_count", "memory_assigned_mb", "hard_drives", "dynamic_memory_enabled", "enhanced_session_transport_type", "guest_service_interface_enabled", "creation_time", "guest_interface_addresses", "trusted_platform_module", "secure_boot", "automatic_checkpoints_enabled", "operational_status", "replication_state", "replication_health", "replication_mode"},
 	}
 
 	if dbUpdateError != "" {

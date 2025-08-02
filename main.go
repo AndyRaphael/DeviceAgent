@@ -335,7 +335,6 @@ func registerDevice(jwtToken string) {
 	device := map[string]interface{}{
 		"id":        deviceID,
 		"name":      strings.TrimSpace(string(hostname)),
-		"status":    "online",
 		"last_seen": time.Now().UTC().Format(time.RFC3339),
 	}
 
@@ -370,7 +369,7 @@ func registerDevice(jwtToken string) {
 	log.Println("Device registered successfully")
 
 	// Collect and update asset information in background
-	go updateDeviceAssets(jwtToken) // DISABLED FOR TESTING
+	go updateDeviceAssets(jwtToken)
 }
 
 func updateDeviceAssets(jwtToken string) {
@@ -516,23 +515,37 @@ func checkMissedCommands(jwtToken string) {
 	}
 
 	now := time.Now()
+	executedCommands := make(map[string]bool) // Track executed commands by type to avoid duplicates
+
 	for _, record := range commands {
 		cmdID := fmt.Sprintf("%v", record["id"])
 		cmd := fmt.Sprintf("%v", record["command"])
 		parameters, _ := record["parameters"].(string)
-		
-		// Check command age (skip commands older than 10 minutes for non-ping commands)
-		if cmd != "ping" {
-			if createdAtStr, ok := record["created_at"].(string); ok {
-				if createdAt, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
-					if now.Sub(createdAt) > 10*time.Minute {
-						log.Printf("Skipping old command %s (age: %v)", cmdID, now.Sub(createdAt))
-						continue
-					}
+
+		// Check command age (skip ALL commands older than 10 minutes)
+		if createdAtStr, ok := record["created_at"].(string); ok {
+			if createdAt, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+				if now.Sub(createdAt) > 10*time.Minute {
+					log.Printf("Skipping old command %s (age: %v)", cmdID, now.Sub(createdAt))
+					continue
 				}
 			}
 		}
-		
+
+		// Deduplicate commands by type - only execute one instance of each command type
+		if executedCommands[cmd] {
+			log.Printf("Skipping duplicate command %s (type: %s)", cmdID, cmd)
+			continue
+		}
+
+		// Mark this command type as executed
+		executedCommands[cmd] = true
+
+		log.Printf("Executing missed command %s (type: %s)", cmdID, cmd)
 		runCommand(jwtToken, cmdID, cmd, parameters)
+	}
+
+	if len(executedCommands) > 0 {
+		log.Printf("Executed %d unique missed commands", len(executedCommands))
 	}
 }

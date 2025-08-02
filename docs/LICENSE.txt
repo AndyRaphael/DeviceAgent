@@ -1,0 +1,70 @@
+END USER LICENSE AGREEMENT (EULA)
+==================================
+
+RMM Device Agent v1.0.0
+
+Copyright (c) 2024 Spiffy Solutions Inc. All rights reserved.
+
+1. LICENSE GRANT
+================
+Subject to the terms of this Agreement, Spiffy Solutions Inc grants you a 
+non-exclusive, non-transferable license to install and use the Software 
+solely for your internal business purposes in connection with Spiffy Solutions 
+RMM services.
+
+2. RESTRICTIONS
+===============
+You may not:
+- Copy, modify, or create derivative works of the Software
+- Reverse engineer, decompile, or disassemble the Software
+- Remove or alter copyright notices or proprietary markings
+- Transfer or sublicense the Software to third parties
+- Use the Software for any purpose other than intended RMM services
+
+3. OWNERSHIP
+============
+The Software is owned by Spiffy Solutions Inc and is protected by copyright 
+laws and international treaty provisions. This license does not transfer 
+ownership of the Software to you.
+
+4. WARRANTY DISCLAIMER
+======================
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER 
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES 
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+5. LIMITATION OF LIABILITY
+==========================
+IN NO EVENT SHALL SPIFFY SOLUTIONS INC BE LIABLE FOR ANY DAMAGES ARISING 
+OUT OF THE USE OR INABILITY TO USE THE SOFTWARE, INCLUDING BUT NOT LIMITED 
+TO DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES.
+
+6. DATA COLLECTION AND PRIVACY
+==============================
+The Software may collect and transmit device information to Spiffy Solutions 
+RMM servers for service delivery. By using the Software, you consent to 
+this data collection and agree to our privacy policy available at spiffyit.com.
+
+7. TERMINATION
+==============
+This license terminates automatically if you fail to comply with its terms. 
+Upon termination, you must cease all use of the Software and remove it from 
+all devices.
+
+8. GOVERNING LAW
+================
+This Agreement is governed by the laws of the jurisdiction where Spiffy 
+Solutions Inc is incorporated.
+
+9. CONTACT INFORMATION
+======================
+For questions about this license:
+- Email: help@spiffyit.com
+- Website: spiffyit.com
+
+By installing or using the Software, you acknowledge that you have read, 
+understood, and agree to be bound by the terms of this Agreement.
+
+Spiffy Solutions Inc
+help@spiffyit.com
+spiffyit.com 
